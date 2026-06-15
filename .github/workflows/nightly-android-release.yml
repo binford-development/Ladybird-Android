@@ -1,0 +1,118 @@
+name: Process & Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_overwrite:
+        description: 'Force overwrite release if it already exists?'
+        type: boolean
+        required: false
+        default: false
+
+  # Triggers automatically when the "Nightly Android" workflow finishes
+  workflow_run:
+    workflows: ["Nightly Android"]
+    types:
+      - completed
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Condition 1: Must be on the main repo
+    # Condition 2: If triggered automatically by workflow_run, the build MUST have succeeded
+    if: |
+      github.repository == 'LadybirdBrowser/ladybird' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # === 1. DOWNLOAD THE RAW APKS ===
+      # If triggered manually, grabs the artifacts from the latest successful run.
+      # If triggered automatically, grabs them specifically from the run that triggered it.
+       Berk-
+      - name: Download Raw Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ladybird-raw-apks
+          path: ./raw-apks
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id || '' }}
+
+      # === 2. EXTRACT VERSION AND PROCESS ARCHITECTURES ===
+      - name: Process and Rename APKs
+        id: process_apks
+        run: |
+          VERSION_NAME=$(grep "versionName" UI/Android/app/build.gradle | awk -F '"' '{print $2}')
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="1.0.0"
+          fi
+          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag_date=$(date +'%Y%m%d%H%M')" >> "$GITHUB_OUTPUT"
+          
+          mkdir -p ./dist-apks
+          
+          # Loop through downloaded raw APKs and apply naming scheme
+          find ./raw-apks -name "*.apk" | while read -r apk; do
+            if [[ "$apk" == *"androidTest"* || "$apk" == *"unaligned"* ]]; then
+              continue
+            fi
+            
+            if [[ "$apk" == *"arm64"* || "$apk" == *"v8a"* ]]; then
+              cp "$apk" "./dist-apks/Ladybird_v${VERSION_NAME}-nightly-arm64-v8a.apk"
+            elif [[ "$apk" == *"x86_64"* || "$apk" == *"x64"* ]]; then
+              cp "$apk" "./dist-apks/Ladybird_v${VERSION_NAME}-nightly-x86_64.apk"
+            fi
+          done
+
+      # === 3. CHECK FOR EXISTING RELEASE ===
+      - name: Check if Release Exists
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${{ steps.process_apks.outputs.version }}-nightly"
+          
+          # Check GitHub API to see if this specific version tag exists
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # === 4. DELETE EXISTING RELEASE (ONLY IF FORCED) ===
+      - name: Delete Existing Release (Force Overwrite)
+        if: |
+          steps.check_release.outputs.exists == 'true' && 
+          github.event.inputs.force_overwrite == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${{ steps.process_apks.outputs.version }}-nightly"
+          echo "Force overwrite enabled. Deleting existing release and tag: $TAG_NAME"
+          gh release delete "$TAG_NAME" --yes --cleanup-tag
+
+      # === 5. CREATE AND PUBLISH RELEASE ===
+      # This step only runs if the release doesn't exist YET, OR if it was just deleted via a force overwrite.
+      - name: Publish GitHub Release
+        if: |
+          steps.check_release.outputs.exists == 'false' || 
+          github.event.inputs.force_overwrite == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.process_apks.outputs.version }}-nightly
+          name: Ladybird Nightly Build v${{ steps.process_apks.outputs.version }}
+          body: |
+            Automated Android Nightly Release.
+            
+            **Version:** v${{ steps.process_apks.outputs.version }}
+            **Release Date:** ${{ steps.process_apks.outputs.tag_date }}
+          draft: false
+          prerelease: true
+          files: ./dist-apks/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
