@@ -30,18 +30,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
+      
       # === 1. DOWNLOAD THE RAW APKS ===
       # If triggered manually, grabs the artifacts from the latest successful run.
       # If triggered automatically, grabs them specifically from the run that triggered it.
-       Berk-
       - name: Download Raw Artifacts
         uses: actions/download-artifact@v4
         with:
           name: ladybird-raw-apks
           path: ./raw-apks
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id || '' }}
+          run-id: ${{ github.event.workflow_run.id || github.run_id }}
 
       # === 2. EXTRACT VERSION AND PROCESS ARCHITECTURES ===
       - name: Process and Rename APKs
