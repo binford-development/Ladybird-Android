@@ -119,13 +119,15 @@ runs:
       shell: bash
       run: |
         VERSION=1.243.0
-        if ${{ inputs.arch == 'arm64' }} ; then
+        if ${{ runner.arch == 'ARM64' }} ; then
           ARCH=aarch64
+        elif ${{ runner.arch == 'X64' }} ; then
+          ARCH=x86_64
         else
           ARCH=${{ inputs.arch }}
         fi
-        LOWERCASE_OS=$( echo -n '${{ inputs.os }}' | tr '[:upper:]' '[:lower:]')
-        if ${{ inputs.os == 'Windows' }} ; then
+        LOWERCASE_OS=$( echo -n '${{ runner.os }}' | tr '[:upper:]' '[:lower:]')
+        if ${{ runner.os == 'Windows' }} ; then
           EXTENSION=zip
         else
           EXTENSION=tar.gz
