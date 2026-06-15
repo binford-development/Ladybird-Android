@@ -2,7 +2,7 @@ name: Nightly Android
 
 on:
   workflow_dispatch:
-  # Automatically run at the end of every day.
+  # Automatically run once a month.
   # schedule:
   #   - cron: '0 0 1 * *'
 
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   CI:
     runs-on: ${{ matrix.os }}
-    if: github.repository == 'LadybirdBrowser/ladybird'
+    if: github.repository == 'binford-development/Ladybird-Android'
     strategy:
       fail-fast: false
       matrix:
