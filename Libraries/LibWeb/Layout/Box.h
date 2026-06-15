@@ -8,6 +8,7 @@
 
 #include <AK/OwnPtr.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibWeb/CSS/Sizing.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Layout/Node.h>
 
@@ -30,21 +31,19 @@ class WEB_API Box : public NodeWithStyleAndBoxModelMetrics {
     GC_DECLARE_ALLOCATOR(Box);
 
 public:
-    Painting::PaintableBox const* paintable_box() const;
-    Painting::PaintableBox* paintable_box();
+    RefPtr<Painting::PaintableBox const> paintable_box() const;
+    RefPtr<Painting::PaintableBox> paintable_box();
 
     // https://www.w3.org/TR/css-images-3/#natural-dimensions
-    Optional<CSSPixels> natural_width() const;
-    Optional<CSSPixels> natural_height() const;
-    Optional<CSSPixelFraction> natural_aspect_ratio() const;
+    virtual CSS::SizeWithAspectRatio natural_size() const { return {}; }
 
-    bool has_natural_width() const { return natural_width().has_value(); }
-    bool has_natural_height() const { return natural_height().has_value(); }
-    bool has_natural_aspect_ratio() const { return natural_aspect_ratio().has_value(); }
-
-    void set_natural_width(Optional<CSSPixels> width) { m_natural_width = width; }
-    void set_natural_height(Optional<CSSPixels> height) { m_natural_height = height; }
-    void set_natural_aspect_ratio(Optional<CSSPixelFraction> ratio) { m_natural_aspect_ratio = ratio; }
+    // When computed width/height is auto, auto_content_box_size gives the fallback content-box size for
+    // elements whose used size is determined by natural dimensions, attributes, or defaults other than
+    // the generic UA fallback (300x150). Any returned aspect ratio comes from natural dimensions (when
+    // available) or may be computed from fallback sizing. Don't confuse this with the CSS preferred
+    // aspect ratio.
+    CSS::SizeWithAspectRatio auto_content_box_size() const;
+    virtual bool has_auto_content_box_size() const { return false; }
 
     // https://www.w3.org/TR/css-sizing-4/#preferred-aspect-ratio
     Optional<CSSPixelFraction> preferred_aspect_ratio() const;
@@ -54,13 +53,11 @@ public:
 
     virtual void did_set_content_size() { }
 
-    virtual GC::Ptr<Painting::Paintable> create_paintable() const override;
+    virtual RefPtr<Painting::Paintable> create_paintable() const override;
 
-    void add_contained_abspos_child(GC::Ref<Node> child) { m_contained_abspos_children.append(child); }
+    void add_contained_abspos_child(Node& child) { m_contained_abspos_children.append(child.make_weak_ptr()); }
     void clear_contained_abspos_children() { m_contained_abspos_children.clear(); }
-    Vector<GC::Ref<Node>> const& contained_abspos_children() const { return m_contained_abspos_children; }
-
-    virtual void visit_edges(Cell::Visitor&) override;
+    Vector<WeakPtr<Node>> const& contained_abspos_children() const { return m_contained_abspos_children; }
 
     IntrinsicSizes& cached_intrinsic_sizes() const
     {
@@ -70,18 +67,16 @@ public:
     }
     void reset_cached_intrinsic_sizes() const { m_cached_intrinsic_sizes.clear(); }
 
-protected:
-    Box(DOM::Document&, DOM::Node*, GC::Ref<CSS::ComputedProperties>);
+    Box(DOM::Document&, DOM::Node*, CSS::ComputedProperties const&);
     Box(DOM::Document&, DOM::Node*, NonnullOwnPtr<CSS::ComputedValues>);
+
+protected:
+    virtual CSS::SizeWithAspectRatio compute_auto_content_box_size() const { return natural_size(); }
 
 private:
     virtual bool is_box() const final { return true; }
 
-    Optional<CSSPixels> m_natural_width;
-    Optional<CSSPixels> m_natural_height;
-    Optional<CSSPixelFraction> m_natural_aspect_ratio;
-
-    Vector<GC::Ref<Node>> m_contained_abspos_children;
+    Vector<WeakPtr<Node>> m_contained_abspos_children;
 
     OwnPtr<IntrinsicSizes> mutable m_cached_intrinsic_sizes;
 };

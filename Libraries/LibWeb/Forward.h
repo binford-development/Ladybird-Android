@@ -13,15 +13,19 @@
 #include <LibGfx/Forward.h>
 #include <LibIPC/Forward.h>
 #include <LibJS/Forward.h>
+#include <LibWeb/Bindings/Forward.h>
 #include <LibWeb/Export.h>
 
 namespace Web {
 
+struct AsyncScrollOperation;
+class AutoScrollHandler;
 class CSSPixels;
 class DisplayListRecordingContext;
 class DragAndDropEventHandler;
 class ElementResizeAction;
 class EventHandler;
+class MiddleButtonScrollHandler;
 class InputEventsTarget;
 class LoadRequest;
 class Page;
@@ -39,16 +43,17 @@ AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(i64, UniqueNodeID, Comparison, Increment, Ca
 
 namespace Web::Painting {
 
+class AccumulatedVisualContextTree;
 class BackingStore;
+class ChromeWidget;
 class DevicePixelConverter;
 class DisplayList;
 class DisplayListPlayerSkia;
 class DisplayListRecorder;
-class SVGGradientPaintStyle;
+class DisplayListResourceStorage;
+struct GradientPaintStyle;
+struct PatternPaintStyle;
 class ScrollStateSnapshot;
-using PaintStyle = RefPtr<SVGGradientPaintStyle>;
-using PaintStyleOrColor = Variant<PaintStyle, Gfx::Color>;
-using ScrollStateSnapshotByDisplayList = HashMap<NonnullRefPtr<DisplayList>, ScrollStateSnapshot>;
 
 }
 
@@ -61,6 +66,7 @@ class AnimationPlaybackEvent;
 class AnimationTimeline;
 class DocumentTimeline;
 class KeyframeEffect;
+class ScrollTimeline;
 
 }
 
@@ -90,6 +96,7 @@ enum class HdrMetadataType : u8;
 enum class ImageSmoothingQuality : u8;
 enum class MediaDecodingType : u8;
 enum class MediaEncodingType : u8;
+enum class MediaStreamTrackState : u8;
 enum class OffscreenRenderingContextId : u8;
 enum class ReadableStreamReaderMode : u8;
 enum class ReferrerPolicy : u8;
@@ -106,6 +113,13 @@ enum class ResponseType : u8;
 enum class TextTrackKind : u8;
 enum class TransferFunction : u8;
 enum class XMLHttpRequestResponseType : u8;
+
+}
+
+namespace Web::MediaCapture {
+
+class MediaStream;
+class MediaStreamTrack;
 
 }
 
@@ -132,7 +146,6 @@ class Policy;
 class PolicyList;
 class SecurityPolicyViolationEvent;
 class Violation;
-struct SecurityPolicyViolationEventInit;
 struct SerializedPolicy;
 
 }
@@ -167,15 +180,6 @@ struct SerializedDirective;
 
 }
 
-namespace Web::Cookie {
-
-struct Cookie;
-struct ParsedCookie;
-
-enum class Source;
-
-}
-
 namespace Web::CookieStore {
 
 class CookieChangeEvent;
@@ -190,56 +194,71 @@ class CredentialsContainer;
 class FederatedCredential;
 class PasswordCredential;
 
-struct CredentialData;
-struct CredentialRequestOptions;
-struct CredentialCreationOptions;
-struct FederatedCredentialRequestOptions;
-struct FederatedCredentialInit;
-struct PasswordCredentialData;
-
 }
 
 namespace Web::Crypto {
 
 class Crypto;
+class CryptoKey;
 class SubtleCrypto;
+
+}
+
+namespace Web::CSS::FilterOperation {
+
+struct Blur;
+struct DropShadow;
+struct HueRotate;
+struct Color;
 
 }
 
 namespace Web::CSS {
 
 class AbstractImageStyleValue;
-class AddFunctionStyleValue;
 class AnchorStyleValue;
 class AnchorSizeStyleValue;
 class Angle;
-class AngleOrCalculated;
 class AnglePercentage;
 class AngleStyleValue;
 class BackgroundSizeStyleValue;
 class BasicShapeStyleValue;
+class BooleanExpression;
 class BorderImageSliceStyleValue;
 class BorderRadiusRectStyleValue;
 class BorderRadiusStyleValue;
 class CalculatedStyleValue;
 class CalculationNode;
 class CascadedProperties;
+class CustomPropertyData;
 class Clip;
+class ColorInterpolationMethodStyleValue;
 class ColorMixStyleValue;
 class ColorSchemeStyleValue;
 class ColorFunctionStyleValue;
 class ColorStyleValue;
 class ComputedProperties;
 class ConicGradientStyleValue;
+class ContainerQuery;
 class ContentStyleValue;
+class ContrastColorStyleValue;
 class CounterDefinitionsStyleValue;
+class CounterStyle;
+class CounterStyleStyleValue;
+class CounterStyleSystemStyleValue;
 class CounterStyleValue;
 class CountersSet;
 class CSSAnimation;
 class CSSConditionRule;
+class CSSContainerRule;
+class CSSCounterStyleRule;
 class CSSDescriptors;
 class CSSFontFaceDescriptors;
 class CSSFontFaceRule;
+class CSSFontFeatureValuesMap;
+class CSSFontFeatureValuesRule;
+class CSSFunctionDescriptors;
+class CSSFunctionRule;
 class CSSGroupingRule;
 class CSSImageValue;
 class CSSImportRule;
@@ -271,6 +290,7 @@ class CSSRotate;
 class CSSRule;
 class CSSRuleList;
 class CSSScale;
+class CSSScopeRule;
 class CSSSkew;
 class CSSSkewX;
 class CSSSkewY;
@@ -293,11 +313,11 @@ class Display;
 class DisplayStyleValue;
 class EasingStyleValue;
 class EdgeStyleValue;
+class EmptyOptionalStyleValue;
 class ExplicitGridTrack;
+class FeatureValue;
 class FilterValueListStyleValue;
-class FitContentStyleValue;
 class Flex;
-class FlexOrCalculated;
 class FlexStyleValue;
 class FontComputer;
 class FontFace;
@@ -305,9 +325,9 @@ class FontFaceSet;
 class FontSourceStyleValue;
 class FontStyleStyleValue;
 class Frequency;
-class FrequencyOrCalculated;
 class FrequencyPercentage;
 class FrequencyStyleValue;
+class FunctionStyleValue;
 class GridAutoFlowStyleValue;
 class GridLineNames;
 class GridMinMax;
@@ -319,38 +339,31 @@ class GridTrackPlacementStyleValue;
 class GridTrackSizeList;
 class GridTrackSizeListStyleValue;
 class GuaranteedInvalidStyleValue;
-class HSLColorStyleValue;
-class HWBColorStyleValue;
+class ImageSetStyleValue;
 class ImageStyleValue;
-class IntegerOrCalculated;
 class IntegerStyleValue;
 class InvalidationSet;
 class KeywordStyleValue;
 class Length;
 class LengthBox;
 class LengthOrAuto;
-class LengthOrAutoOrCalculated;
-class LengthOrCalculated;
 class LengthPercentage;
 class LengthPercentageOrAuto;
 class LengthStyleValue;
 class LinearGradientStyleValue;
-class MediaFeatureValue;
 class MediaList;
 class MediaQuery;
 class MediaQueryList;
 class MediaQueryListEvent;
 class Number;
-class NumberOrCalculated;
 class NumberStyleValue;
 class NumericType;
-class OKLabColorStyleValue;
-class OKLCHColorStyleValue;
+class OpacityValueStyleValue;
 class OpenTypeTaggedStyleValue;
+class OverflowClipMarginStyleValue;
 class ParsedFontFace;
 class PendingSubstitutionStyleValue;
 class Percentage;
-class PercentageOrCalculated;
 class PercentageStyleValue;
 class PositionStyleValue;
 class PropertyNameAndID;
@@ -362,9 +375,7 @@ class RatioStyleValue;
 class RectStyleValue;
 class RepeatStyleStyleValue;
 class Resolution;
-class ResolutionOrCalculated;
 class ResolutionStyleValue;
-class RGBColorStyleValue;
 class Screen;
 class ScreenOrientation;
 class ScrollbarGutterStyleValue;
@@ -372,8 +383,8 @@ class Selector;
 class ShadowStyleValue;
 class ShorthandStyleValue;
 class Size;
+class SizeFeature;
 class ScrollbarColorStyleValue;
-class ScrollFunctionStyleValue;
 class StringStyleValue;
 class StyleComputer;
 class StylePropertyMap;
@@ -389,42 +400,105 @@ class SVGPaint;
 class TextIndentStyleValue;
 class TextUnderlinePositionStyleValue;
 class Time;
-class TimeOrCalculated;
 class TimePercentage;
 class TimeStyleValue;
+template<typename T>
+class TokenStream;
 class TransformationStyleValue;
 class TreeCountingFunctionStyleValue;
+class TupleStyleValue;
 class UnicodeRangeStyleValue;
 class UnresolvedStyleValue;
 class URL;
 class URLStyleValue;
-class ViewFunctionStyleValue;
 class VisualViewport;
 
+enum class FontFeatureValueType : u8;
 enum class Keyword : u16;
 enum class MediaFeatureID : u8;
 enum class PropertyID : u16;
-enum class PaintOrder : u8;
+enum class SizeFeatureID : u8;
 enum class ValueType : u8;
 enum class AnimatedPropertyResultOfTransition : u8;
+
+enum class AbsoluteSize : u8;
+enum class AnchorSize : u8;
+enum class AnimationComposition : u8;
+enum class AnimationDirection : u8;
+enum class AnimationFillMode : u8;
 enum class AnimationPlayState : u8;
+enum class Axis : u8;
+enum class CommonLigValue : u8;
+enum class ContextualAltValue : u8;
+enum class CounterStyleSystem : u8;
+enum class CrossOriginModifierValue : u8;
+enum class Direction : u8;
+enum class DiscretionaryLigValue : u8;
+enum class DisplayBox : u8;
+enum class DisplayInside : u8;
+enum class DisplayInternal : u8;
+enum class DisplayOutside : u8;
+enum class EastAsianVariant : u8;
+enum class EastAsianWidth : u8;
+enum class FontDisplay : u8;
+enum class FontKerning : u8;
+enum class FontOpticalSizing : u8;
+enum class FontStyleKeyword : u8;
+enum class FontTech : u8;
+enum class FontVariantCaps : u8;
+enum class FontVariantEmoji : u8;
+enum class FontVariantPosition : u8;
+enum class HistoricalLigValue : u8;
+enum class HueInterpolationMethod : u8;
+enum class ImageRendering : u8;
+enum class MixBlendMode : u8;
+enum class NumericFigureValue : u8;
+enum class NumericSpacingValue : u8;
+enum class NumericFractionValue : u8;
+enum class PaintOrder : u8;
+enum class PositionEdge : u8;
+enum class RadialExtent : u8;
+enum class ReferrerPolicyModifierValue : u8;
+enum class RelativeSize : u8;
+enum class Repetition : u8;
+enum class RoundingStrategy : u8;
+enum class Scroller : u8;
+enum class StepPosition : u8;
+enum class StrokeLinecap : u8;
+enum class StrokeLinejoin : u8;
+enum class SymbolsType : u8;
+enum class TextRendering : u8;
+enum class TextUnderlinePositionHorizontal : u8;
+enum class TextUnderlinePositionVertical : u8;
+enum class TransitionBehavior : u8;
+enum class WritingMode : u8;
 
 struct BackgroundLayerData;
 struct CalculationContext;
 struct CalculationResolutionContext;
-struct CSSStyleSheetInit;
+struct ComputationContext;
+struct FunctionParameterInternal;
 struct GridRepeatParams;
 struct LogicalAliasMappingContext;
+struct NormalGap;
 struct RandomCachingKey;
+struct RequiredInvalidationAfterStyleChange;
 struct StyleSheetIdentifier;
 struct TransitionProperties;
-template<typename T>
-struct ValueComparingNonnullRefPtr;
 
 // https://drafts.css-houdini.org/css-typed-om-1/#typedefdef-cssnumberish
-using CSSNumberish = Variant<double, GC::Root<CSSNumericValue>>;
+using CSSNumberish = Variant<double, GC::Ref<CSSNumericValue>>;
 using PaintOrderList = Array<PaintOrder, 3>;
 using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
+using StyleValueTuple = Vector<ValueComparingRefPtr<StyleValue const>>;
+
+using FilterValue = Variant<FilterOperation::Blur, FilterOperation::DropShadow, FilterOperation::HueRotate, FilterOperation::Color, URL>;
+
+}
+
+namespace Web::CSS::Invalidation {
+
+class StyleInvalidator;
 
 }
 
@@ -433,6 +507,7 @@ namespace Web::CSS::Parser {
 class ComponentValue;
 class GuardedSubstitutionContexts;
 class Parser;
+class RustTokenizer;
 class SyntaxNode;
 class Token;
 class Tokenizer;
@@ -454,8 +529,10 @@ class AbortSignal;
 class AbstractElement;
 class AbstractRange;
 class AccessibilityTreeNode;
+class AnchorNameMap;
 class Attr;
 class CDATASection;
+class CaretPosition;
 class CharacterData;
 class Comment;
 class CustomEvent;
@@ -490,17 +567,16 @@ class PseudoElement;
 class Range;
 class RegisteredObserver;
 class ShadowRoot;
+class SlotRegistry;
 class StaticNodeList;
 class StaticRange;
-class StyleInvalidator;
+class SyntheticPseudoElement;
 class Text;
 class TreeWalker;
 class XMLDocument;
 
 enum class QuirksMode;
-
-struct AddEventListenerOptions;
-struct EventListenerOptions;
+enum class SetNeedsLayoutReason;
 
 }
 
@@ -509,10 +585,6 @@ namespace Web::Encoding {
 class TextDecoder;
 class TextEncoder;
 class TextEncoderStream;
-
-struct TextDecodeOptions;
-struct TextDecoderOptions;
-struct TextEncoderEncodeIntoResult;
 
 }
 
@@ -606,10 +678,6 @@ class DOMRect;
 class DOMRectList;
 class DOMRectReadOnly;
 
-struct DOMMatrix2DInit;
-struct DOMMatrixInit;
-struct DOMPointInit;
-
 }
 
 namespace Web::HTML {
@@ -700,6 +768,8 @@ class HTMLOutputElement;
 class HTMLParagraphElement;
 class HTMLParamElement;
 class HTMLParser;
+class HTMLParserEndState;
+class SpeculativeHTMLParser;
 class HTMLPictureElement;
 class HTMLPreElement;
 class HTMLProgressElement;
@@ -755,6 +825,8 @@ class Path2D;
 class Plugin;
 class PluginArray;
 class PopoverTargetAttributes;
+class PreloadEntry;
+struct PreloadKey;
 class PromiseRejectionEvent;
 class RadioNodeList;
 class SelectedFile;
@@ -781,7 +853,6 @@ class UserActivation;
 class ValidityState;
 class VideoTrack;
 class VideoTrackList;
-class WebWorkerClient;
 class Window;
 class WindowEnvironmentSettingsObject;
 class WindowProxy;
@@ -795,10 +866,11 @@ class WorkerNavigator;
 class XMLSerializer;
 
 enum class AllowMultipleFiles;
-enum class MediaSeekMode;
+enum class RequireWellFormed;
 enum class SandboxingFlagSet;
 
 struct Agent;
+struct BroadcastChannelMessage;
 struct DeserializedTransferRecord;
 struct EmbedderPolicy;
 struct Environment;
@@ -809,14 +881,10 @@ struct OpenerPolicyEnforcementResult;
 struct PaintConfig;
 struct PolicyContainer;
 struct POSTResource;
-struct ScrollOptions;
-struct ScrollToOptions;
 struct SerializedFormData;
 struct SerializedPolicyContainer;
 struct SerializedTransferRecord;
 struct SourceSnapshotParams;
-struct StructuredSerializeOptions;
-struct SyntheticRealmSettings;
 struct ToggleTaskTracker;
 
 }
@@ -833,7 +901,6 @@ class Database;
 class IDBCursor;
 class IDBCursorWithValue;
 class IDBDatabase;
-class IDBDatabaseObserver;
 class IDBFactory;
 class IDBIndex;
 class IDBKeyRange;
@@ -841,9 +908,7 @@ class IDBObjectStore;
 class IDBOpenDBRequest;
 class IDBRecord;
 class IDBRequest;
-class IDBRequestObserver;
 class IDBTransaction;
-class IDBTransactionObserver;
 class IDBVersionChangeEvent;
 class Index;
 class ObjectStore;
@@ -853,9 +918,11 @@ class RequestList;
 
 namespace Web::Internals {
 
+class FakeXRDevice;
 class Internals;
 class InternalGamepad;
 class WebUI;
+class XRTest;
 
 }
 
@@ -863,8 +930,6 @@ namespace Web::IntersectionObserver {
 
 class IntersectionObserver;
 class IntersectionObserverEntry;
-
-struct IntersectionObserverRegistration;
 
 }
 
@@ -883,7 +948,6 @@ class ImageBox;
 class InlineFormattingContext;
 class InlineNode;
 class Label;
-class LabelableNode;
 class LegendBox;
 class LineBox;
 class LineBoxFragment;
@@ -894,8 +958,10 @@ class NodeWithStyle;
 class NodeWithStyleAndBoxModelMetrics;
 class RadioButton;
 class ReplacedBox;
+class SVGSVGBox;
 class TableWrapper;
 class TextNode;
+class TextOffsetMapping;
 class TreeBuilder;
 class VideoBox;
 class Viewport;
@@ -917,17 +983,6 @@ class MathMLMspaceElement;
 namespace Web::MediaCapabilitiesAPI {
 
 class MediaCapabilities;
-
-struct AudioConfiguration;
-struct KeySystemTrackConfiguration;
-struct MediaCapabilitiesDecodingInfo;
-struct MediaCapabilitiesEncodingInfo;
-struct MediaCapabilitiesInfo;
-struct MediaCapabilitiesKeySystemConfiguration;
-struct MediaConfiguration;
-struct MediaDecodingConfiguration;
-struct MediaEncodingConfiguration;
-struct VideoConfiguration;
 
 }
 
@@ -958,9 +1013,6 @@ class PerformanceTiming;
 
 namespace Web::NotificationsAPI {
 
-struct NotificationAction;
-struct NotificationOptions;
-
 class Notification;
 
 }
@@ -970,7 +1022,6 @@ namespace Web::Painting {
 class AudioPaintable;
 class CheckBoxPaintable;
 class FieldSetPaintable;
-class LabelablePaintable;
 class MediaPaintable;
 class Paintable;
 class PaintableBox;
@@ -982,8 +1033,6 @@ class VideoPaintable;
 class ViewportPaintable;
 
 enum class PaintPhase;
-enum class ShouldAntiAlias : bool;
-
 struct BorderRadiiData;
 struct BorderRadiusData;
 struct LinearGradientData;
@@ -996,13 +1045,18 @@ class PerformanceEntry;
 class PerformanceObserver;
 class PerformanceObserverEntryList;
 
-struct PerformanceObserverInit;
-
 }
 
 namespace Web::PermissionsPolicy {
 
 class AutoplayAllowlist;
+
+}
+
+namespace Web::PermissionsAPI {
+
+class Permissions;
+class PermissionStatus;
 
 }
 
@@ -1047,17 +1101,12 @@ namespace Web::Serial {
 class Serial;
 class SerialPort;
 
-struct SerialPortFilter;
-struct SerialPortRequestOptions;
-struct SerialOptions;
-struct SerialOutputSignals;
-struct SerialInputSignals;
-struct SerialPortInfo;
-
 }
 
 namespace Web::ServiceWorker {
 
+class Cache;
+class CacheStorage;
 class ServiceWorker;
 class ServiceWorkerContainer;
 class ServiceWorkerRegistration;
@@ -1101,12 +1150,6 @@ class WritableStreamDefaultController;
 class WritableStreamDefaultWriter;
 
 struct PullIntoDescriptor;
-struct QueuingStrategy;
-struct QueuingStrategyInit;
-struct ReadableStreamGetReaderOptions;
-struct Transformer;
-struct UnderlyingSink;
-struct UnderlyingSource;
 
 }
 
@@ -1127,6 +1170,7 @@ namespace Web::SVG {
 
 class Path;
 class SVGAnimatedEnumeration;
+class SVGAnimatedInteger;
 class SVGAnimatedLength;
 class SVGAnimatedLengthList;
 class SVGAnimatedNumber;
@@ -1145,6 +1189,7 @@ class SVGFEBlendElement;
 class SVGFEColorMatrixElement;
 class SVGFEComponentTransferElement;
 class SVGFECompositeElement;
+class SVGFEDisplacementMapElement;
 class SVGFEFloodElement;
 class SVGFEFuncAElement;
 class SVGFEFuncBElement;
@@ -1153,6 +1198,7 @@ class SVGFEFuncRElement;
 class SVGFEGaussianBlurElement;
 class SVGFEImageElement;
 class SVGFEMorphologyElement;
+class SVGFETurbulenceElement;
 class SVGFilterElement;
 class SVGFitToViewBox;
 class SVGForeignObjectElement;
@@ -1167,6 +1213,7 @@ class SVGMetadataElement;
 class SVGNumber;
 class SVGNumberList;
 class SVGPathElement;
+class SVGPatternElement;
 class SVGPolygonElement;
 class SVGPolylineElement;
 class SVGRectElement;
@@ -1224,6 +1271,7 @@ class Instance;
 class Memory;
 class Module;
 class Table;
+class WebAssemblyModule;
 
 }
 
@@ -1250,10 +1298,6 @@ class PeriodicWave;
 
 enum class AudioContextState;
 
-struct AudioContextOptions;
-struct DynamicsCompressorOptions;
-struct OscillatorOptions;
-
 }
 
 namespace Web::WebGL {
@@ -1269,6 +1313,7 @@ class WebGLProgram;
 class WebGLQuery;
 class WebGLRenderbuffer;
 class WebGLRenderingContext;
+class WebGLRenderingContextBase;
 class WebGLSampler;
 class WebGLShader;
 class WebGLShaderPrecisionFormat;
@@ -1277,17 +1322,13 @@ class WebGLTexture;
 class WebGLTransformFeedback;
 class WebGLUniformLocation;
 class WebGLVertexArrayObject;
-
-}
-
-namespace Web::WebGL::Extensions {
-
 class ANGLEInstancedArrays;
 class EXTBlendMinMax;
 class EXTColorBufferFloat;
 class EXTRenderSnorm;
 class EXTTextureFilterAnisotropic;
 class EXTTextureNorm16;
+class OESElementIndexUint;
 class OESStandardDerivatives;
 class OESVertexArrayObject;
 class WebGLCompressedTextureS3tc;
@@ -1303,6 +1344,7 @@ class ArrayBufferView;
 class BufferSource;
 class CallbackType;
 class DOMException;
+class ObservableArray;
 
 template<typename ValueType>
 class ExceptionOr;
@@ -1312,8 +1354,6 @@ using Promise = JS::PromiseCapability;
 }
 
 namespace Web::WebDriver {
-
-class HeapTimer;
 
 struct ActionObject;
 struct InputState;
@@ -1335,7 +1375,12 @@ class VTTRegion;
 
 namespace Web::WebXR {
 
+class XRLayer;
+class XRRenderState;
+class XRSession;
+class XRSessionEvent;
 class XRSystem;
+class XRWebGLLayer;
 
 }
 
@@ -1352,16 +1397,6 @@ struct FormDataEntry;
 
 }
 
-namespace IPC {
-
-template<>
-WEB_API ErrorOr<void> encode(Encoder&, Web::UniqueNodeID const&);
-
-template<>
-WEB_API ErrorOr<Web::UniqueNodeID> decode(Decoder&);
-
-}
-
 namespace Web::TrustedTypes {
 
 class TrustedHTML;
@@ -1369,7 +1404,6 @@ class TrustedScript;
 class TrustedScriptURL;
 class TrustedTypePolicy;
 class TrustedTypePolicyFactory;
-struct TrustedTypePolicyOptions;
 
 }
 

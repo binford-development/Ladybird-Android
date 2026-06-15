@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibTextCodec/Decoder.h>
-#include <LibWeb/Bindings/ClipboardPrototype.h>
+#include <LibWeb/Bindings/Clipboard.h>
 #include <LibWeb/Clipboard/Clipboard.h>
 #include <LibWeb/Clipboard/ClipboardItem.h>
 #include <LibWeb/Clipboard/SystemClipboard.h>
@@ -167,7 +167,7 @@ static bool check_clipboard_write_permission(JS::Realm& realm)
 }
 
 // https://w3c.github.io/clipboard-apis/#dom-clipboard-readtext
-GC::Ref<WebIDL::Promise> Clipboard::read(ClipboardUnsanitizedFormats formats)
+GC::Ref<WebIDL::Promise> Clipboard::read(Bindings::ClipboardUnsanitizedFormats formats)
 {
     // 1. Let realm be this's relevant realm.
     auto& realm = HTML::relevant_realm(*this);
@@ -208,7 +208,7 @@ GC::Ref<WebIDL::Promise> Clipboard::read(ClipboardUnsanitizedFormats formats)
             HTML::TemporaryExecutionContext execution_context { realm };
 
             // 4. Let items be a sequence<clipboard item>.
-            GC::RootVector<JS::Value> items(realm.heap());
+            GC::RootVector<JS::Value> items;
 
             // 5. For each systemClipboardItem in data:
             for (auto const& system_clipboard_item : data) {
@@ -398,7 +398,7 @@ GC::Ref<WebIDL::Promise> Clipboard::read_text()
 }
 
 // https://w3c.github.io/clipboard-apis/#dom-clipboard-write
-GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Root<ClipboardItem>>& data)
+GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Ref<ClipboardItem>> const& data)
 {
     // 1. Let realm be this's relevant realm.
     auto& realm = HTML::relevant_realm(*this);
@@ -441,8 +441,8 @@ GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Root<ClipboardItem>
 
             // 4. For each clipboardItem in dataList:
             for (auto const& clipboard_item : data_list) {
-                IGNORE_USE_IN_ESCAPING_LAMBDA GC::RootVector<GC::Ref<FileAPI::Blob>> item_list(realm.heap());
-                GC::RootVector<GC::Ref<FileAPI::Blob>> clean_item_list(realm.heap());
+                IGNORE_USE_IN_ESCAPING_LAMBDA GC::RootVector<GC::Ref<FileAPI::Blob>> item_list;
+                GC::RootVector<GC::Ref<FileAPI::Blob>> clean_item_list;
 
                 // 1. For each representation in clipboardItem’s clipboard item's list of representations:
                 for (auto const& representation : clipboard_item->representations()) {
@@ -464,11 +464,9 @@ GC::Ref<WebIDL::Promise> Clipboard::write(GC::RootVector<GC::Root<ClipboardItem>
                                 // 3. Add blobData to itemList.
                                 item_list.append(blob_data);
                             }
-
                             // 2. If v is a Blob, then add v to itemList.
-                            else if (value.is_object()) {
-                                if (auto* blob = as_if<FileAPI::Blob>(value.as_object()))
-                                    item_list.append(*blob);
+                            else if (auto blob = value.as_if<FileAPI::Blob>()) {
+                                item_list.append(*blob);
                             }
 
                             return JS::js_undefined();
@@ -569,7 +567,7 @@ GC::Ref<WebIDL::Promise> Clipboard::write_text(String data)
         // 3. Queue a global task on the clipboard task source, given realm’s global object, to perform the below steps:
         queue_global_task(HTML::Task::Source::Clipboard, realm.global_object(), GC::create_function(realm.heap(), [&realm, promise, data = move(data)]() mutable {
             // 1. Let itemList be an empty sequence<Blob>.
-            GC::RootVector<GC::Ref<FileAPI::Blob>> item_list(realm.heap());
+            GC::RootVector<GC::Ref<FileAPI::Blob>> item_list;
 
             // 2. Let textBlob be a new Blob created with: type attribute set to "text/plain;charset=utf-8", and its
             //    underlying byte sequence set to the UTF-8 encoding of data.

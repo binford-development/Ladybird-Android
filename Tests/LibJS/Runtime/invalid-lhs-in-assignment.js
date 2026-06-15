@@ -1,22 +1,32 @@
-test.xfail("assignment to function call", () => {
+test("assignment to function call", () => {
     expect(() => {
         function foo() {}
         foo() = "foo";
     }).toThrowWithMessage(ReferenceError, "Invalid left-hand side in assignment");
 });
 
-test.xfail("Postfix operator after function call", () => {
+test("Postfix operator after function call", () => {
     expect(() => {
         function foo() {}
         foo()++;
     }).toThrow(ReferenceError);
 });
 
-test("assignment to function call in strict mode", () => {
-    expect("'use strict'; foo() = 'foo'").toEval();
+test("assignment to function call in strict mode is a SyntaxError", () => {
+    expect("'use strict'; foo() = 'foo'").not.toEval();
 });
 
-test.xfail("assignment to inline function call", () => {
+test("strict assignment to unresolvable reference preserves initial reference", () => {
+    delete globalThis.__test_unresolvable_assignment;
+    expect(() => {
+        "use strict";
+        __test_unresolvable_assignment = (globalThis.__test_unresolvable_assignment = 5);
+    }).toThrowWithMessage(ReferenceError, "'__test_unresolvable_assignment' is not defined");
+    expect(globalThis.__test_unresolvable_assignment).toBe(5);
+    delete globalThis.__test_unresolvable_assignment;
+});
+
+test("assignment to inline function call", () => {
     expect(() => {
         (function () {})() = "foo";
     }).toThrowWithMessage(ReferenceError, "Invalid left-hand side in assignment");

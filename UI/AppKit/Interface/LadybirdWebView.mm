@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,11 +8,15 @@
 #include <Interface/LadybirdWebViewBridge.h>
 #include <LibURL/URL.h>
 #include <LibWeb/HTML/SelectedFile.h>
+#include <LibWebView/Application.h>
+#include <LibWebView/Utilities.h>
 
 #import <Application/ApplicationDelegate.h>
 #import <Interface/Event.h>
 #import <Interface/LadybirdWebView.h>
 #import <Interface/Menu.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Utilities/Conversions.h>
 
@@ -35,11 +39,62 @@ struct HideCursor {
     }
 };
 
+static Optional<u64> display_id_for_screen(NSScreen* screen)
+{
+    if (screen == nil)
+        return {};
+
+    NSNumber* screen_number = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+    if (screen_number == nil)
+        return {};
+
+    return static_cast<u64>([screen_number unsignedLongLongValue]);
+}
+
+static bool is_browser_reserved_key_equivalent(NSEvent* event)
+{
+    auto modifiers = event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
+    if (modifiers != NSEventModifierFlagCommand)
+        return false;
+
+    auto* characters = [[event charactersIgnoringModifiers] lowercaseString];
+    if ([characters length] != 1)
+        return false;
+
+    unichar character = [characters characterAtIndex:0];
+    return character == 'l'
+        || character == 'n'
+        || character == 'q'
+        || character == 't'
+        || character == 'w';
+}
+
+static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge const& web_view_bridge, Web::DevicePixelPoint widget_position)
+{
+    return {
+        widget_position.x().value() * web_view_bridge.device_pixel_ratio(),
+        widget_position.y().value() * web_view_bridge.device_pixel_ratio(),
+    };
+}
+
+@interface LadybirdWebViewContentLayer : CALayer
+@end
+
+@implementation LadybirdWebViewContentLayer
+- (void)display
+{
+    [self.delegate displayLayer:self];
+}
+@end
+
 @interface LadybirdWebView () <NSDraggingDestination>
 {
     OwnPtr<Ladybird::WebViewBridge> m_web_view_bridge;
 
     Optional<HideCursor> m_hidden_cursor;
+
+    id<MTLDevice> m_metal_device;
+    id<MTLCommandQueue> m_metal_queue;
 
     // We have to send key events for modifer keys, but AppKit does not generate key down/up events when only a modifier
     // key is pressed. Instead, we only receive an event that the modifier flags have changed, and we must determine for
@@ -65,6 +120,10 @@ struct HideCursor {
 // To handle key events after dead key processing, we need to hold onto the originating key-down event.
 @property (nonatomic, strong) NSEvent* current_key_down_event;
 
+// Length of the marked text (input-method preedit) currently shown in the focused editable. LibWeb owns the marked-text
+// range and replaces the preedit itself. The UI keeps this length only to answer the NSTextInputClient range queries.
+@property (nonatomic, assign) NSUInteger marked_text_length;
+
 @end
 
 @implementation LadybirdWebView
@@ -78,6 +137,11 @@ struct HideCursor {
     }
 
     return self;
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (instancetype)initAsChild:(id<LadybirdWebViewObserver>)observer
@@ -96,6 +160,11 @@ struct HideCursor {
     if (self = [super init]) {
         self.observer = observer;
 
+        if (WebView::Application::web_content_options().force_cpu_painting != WebView::ForceCPUPainting::Yes) {
+            m_metal_device = MTLCreateSystemDefaultDevice();
+            m_metal_queue = [m_metal_device newCommandQueue];
+        }
+
         auto* screens = [NSScreen screens];
 
         Vector<Web::DevicePixelRect> screen_rects;
@@ -109,9 +178,15 @@ struct HideCursor {
         // This returns device pixel ratio of the screen the window is opened in
         auto device_pixel_ratio = [[NSScreen mainScreen] backingScaleFactor];
         auto maximum_frames_per_second = [[NSScreen mainScreen] maximumFramesPerSecond];
+        auto display_id = display_id_for_screen([NSScreen mainScreen]);
 
-        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(move(screen_rects), device_pixel_ratio, maximum_frames_per_second));
+        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(move(screen_rects), device_pixel_ratio, maximum_frames_per_second, display_id));
         [self setWebViewCallbacks];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(inputSourceDidChange:)
+                                                     name:NSTextInputContextKeyboardSelectionDidChangeNotification
+                                                   object:nil];
 
         self.page_context_menu = Ladybird::create_context_menu(self, [self view].page_context_menu());
         self.link_context_menu = Ladybird::create_context_menu(self, [self view].link_context_menu());
@@ -181,7 +256,23 @@ struct HideCursor {
 
 - (void)handleDisplayRefreshRateChange
 {
-    m_web_view_bridge->set_maximum_frames_per_second([[[self window] screen] maximumFramesPerSecond]);
+    auto* screen = [[self window] screen];
+    m_web_view_bridge->set_display_metadata([screen maximumFramesPerSecond], display_id_for_screen(screen));
+}
+
+- (void)handleEnteredFullScreen
+{
+    m_web_view_bridge->set_is_fullscreen(Web::ViewportIsFullscreen::Yes);
+}
+
+- (void)handleExitedFullScreen
+{
+    m_web_view_bridge->set_is_fullscreen(Web::ViewportIsFullscreen::No);
+}
+
+- (void)handleExitFullScreen
+{
+    m_web_view_bridge->exit_fullscreen();
 }
 
 - (void)handleVisibility:(BOOL)is_visible
@@ -205,6 +296,21 @@ struct HideCursor {
 - (void)findInPagePreviousMatch
 {
     m_web_view_bridge->find_in_page_previous_match();
+}
+
+- (void)requestClose
+{
+    m_web_view_bridge->request_close();
+}
+
+- (Function<void()>)prepareForImmediateClose
+{
+    return m_web_view_bridge->prepare_for_immediate_close();
+}
+
+- (BOOL)needsBeforeUnloadCheck
+{
+    return m_web_view_bridge->needs_beforeunload_check();
 }
 
 #pragma mark - Private methods
@@ -238,10 +344,12 @@ struct HideCursor {
 
     m_web_view_bridge->on_ready_to_paint = [weak_self]() {
         LadybirdWebView* self = weak_self;
-        if (self == nil) {
+        if (self == nil)
             return;
-        }
-        [self setNeedsDisplay:YES];
+        if (m_metal_device)
+            [self presentMetalFrame];
+        else
+            [self.layer setNeedsDisplay];
     };
 
     m_web_view_bridge->on_new_web_view = [weak_self](auto activate_tab, auto, auto page_index) {
@@ -698,7 +806,7 @@ struct HideCursor {
                           auto create_selected_file = [&](NSString* ns_file_path) {
                               auto file_path = Ladybird::ns_string_to_byte_string(ns_file_path);
 
-                              if (auto file = Web::HTML::SelectedFile::from_file_path(file_path); file.is_error())
+                              if (auto file = WebView::create_selected_file(file_path); file.is_error())
                                   warnln("Unable to open file {}: {}", file_path, file.error());
                               else
                                   selected_files.append(file.release_value());
@@ -820,14 +928,19 @@ struct HideCursor {
             return;
         }
 
-        if (([[self window] styleMask] & NSWindowStyleMaskFullScreen) == 0) {
-            [[self window] toggleFullScreen:nil];
-        }
-
-        m_web_view_bridge->did_update_window_rect();
+        [self.observer onEnterFullscreenWindow];
     };
 
-    m_web_view_bridge->on_theme_color_change = [weak_self](auto color) {
+    m_web_view_bridge->on_exit_fullscreen_window = [weak_self]() {
+        LadybirdWebView* self = weak_self;
+        if (self == nil) {
+            return;
+        }
+
+        [self.observer onExitFullscreenWindow];
+    };
+
+    m_web_view_bridge->on_page_background_color_change = [weak_self](auto color) {
         LadybirdWebView* self = weak_self;
         if (self == nil) {
             return;
@@ -853,12 +966,17 @@ struct HideCursor {
     };
 }
 
-- (void)handleCurrentKeyDownEvent
+- (void)handleCurrentKeyDownEvent:(BOOL)shouldInsertText
 {
     if (!self.current_key_down_event)
         return;
 
-    auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, self.current_key_down_event);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        self.current_key_down_event = nil;
+        return;
+    }
+
+    auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, self.current_key_down_event, shouldInsertText);
     m_web_view_bridge->enqueue_input_event(move(key_event));
 
     self.current_key_down_event = nil;
@@ -904,32 +1022,103 @@ struct HideCursor {
 
 #pragma mark - NSView
 
-- (void)drawRect:(NSRect)rect
+- (CALayer*)makeBackingLayer
 {
+    if (!m_metal_device) {
+        CALayer* layer = [LadybirdWebViewContentLayer layer];
+        layer.contentsGravity = kCAGravityTopLeft;
+        layer.backgroundColor = [Ladybird::gfx_color_to_ns_color(m_web_view_bridge->page_background_color()) CGColor];
+        return layer;
+    }
+
+    CAMetalLayer* layer = [CAMetalLayer layer];
+    layer.device = m_metal_device;
+    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.framebufferOnly = YES;
+    layer.displaySyncEnabled = YES;
+    layer.contentsGravity = kCAGravityTopLeft;
+    layer.backgroundColor = [Ladybird::gfx_color_to_ns_color(m_web_view_bridge->page_background_color()) CGColor];
+    return layer;
+}
+
+- (void)presentMetalFrame
+{
+    VERIFY(m_metal_device);
+
+    auto paintable = m_web_view_bridge->paintable();
+    if (!paintable.has_value())
+        return;
+    auto [shared_image_buffer, bitmap_size] = *paintable;
+    VERIFY(shared_image_buffer);
+    auto bitmap = shared_image_buffer->bitmap();
+
+    CAMetalLayer* metal_layer = (CAMetalLayer*)self.layer;
+    metal_layer.drawableSize = CGSizeMake(bitmap_size.width(), bitmap_size.height());
+    metal_layer.contentsScale = m_web_view_bridge->device_pixel_ratio();
+
+    id<CAMetalDrawable> drawable = [metal_layer nextDrawable];
+    if (!drawable)
+        return;
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                    width:bitmap->width()
+                                                                                   height:bitmap->height()
+                                                                                mipmapped:NO];
+    desc.storageMode = MTLStorageModeShared;
+    desc.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> src_texture = [m_metal_device newTextureWithDescriptor:desc
+                                                                iosurface:(IOSurfaceRef)shared_image_buffer->iosurface_handle().core_foundation_pointer()
+                                                                    plane:0];
+
+    id<MTLCommandBuffer> cmd_buf = [m_metal_queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmd_buf blitCommandEncoder];
+    [blit copyFromTexture:src_texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(bitmap_size.width(), bitmap_size.height(), 1)
+                toTexture:drawable.texture
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    [cmd_buf presentDrawable:drawable];
+    [cmd_buf commit];
+}
+
+- (void)viewWillStartLiveResize
+{
+    [super viewWillStartLiveResize];
+    self.layerContentsPlacement = NSViewLayerContentsPlacementTopLeft;
+}
+
+- (void)viewDidEndLiveResize
+{
+    [super viewDidEndLiveResize];
+    self.layerContentsPlacement = NSViewLayerContentsPlacementScaleAxesIndependently;
+}
+
+- (void)displayLayer:(CALayer*)layer
+{
+    VERIFY(!m_metal_device);
+
     auto paintable = m_web_view_bridge->paintable();
     if (!paintable.has_value()) {
-        [super drawRect:rect];
+        layer.contents = nil;
         return;
     }
 
-    auto [bitmap, bitmap_size] = *paintable;
-    VERIFY(bitmap.format() == Gfx::BitmapFormat::BGRA8888);
+    auto [shared_image_buffer, bitmap_size] = *paintable;
+    VERIFY(shared_image_buffer);
+    auto bitmap = shared_image_buffer->bitmap();
+
+    VERIFY(bitmap->format() == Gfx::BitmapFormat::BGRA8888);
 
     static constexpr size_t BITS_PER_COMPONENT = 8;
     static constexpr size_t BITS_PER_PIXEL = 32;
+    static auto* color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
 
-    auto* context = [[NSGraphicsContext currentContext] CGContext];
-    CGContextSaveGState(context);
-
-    auto device_pixel_ratio = m_web_view_bridge->device_pixel_ratio();
-    auto inverse_device_pixel_ratio = m_web_view_bridge->inverse_device_pixel_ratio();
-
-    CGContextScaleCTM(context, inverse_device_pixel_ratio, inverse_device_pixel_ratio);
-
-    auto* provider = CGDataProviderCreateWithData(nil, bitmap.scanline_u8(0), bitmap.size_in_bytes(), nil);
-    auto image_rect = CGRectMake(rect.origin.x * device_pixel_ratio, rect.origin.y * device_pixel_ratio, bitmap_size.width(), bitmap_size.height());
-
-    static auto color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    auto* provider = CGDataProviderCreateWithData(nil, bitmap->scanline_u8(0), bitmap->size_in_bytes(), nil);
 
     // Ideally, this would be NSBitmapImageRep, but the equivalent factory initWithBitmapDataPlanes: does
     // not seem to actually respect endianness. We need NSBitmapFormatThirtyTwoBitLittleEndian, but the
@@ -939,7 +1128,7 @@ struct HideCursor {
         bitmap_size.height(),
         BITS_PER_COMPONENT,
         BITS_PER_PIXEL,
-        bitmap.pitch(),
+        bitmap->pitch(),
         color_space,
         kCGBitmapByteOrder32Little | kCGImageAlphaFirst,
         provider,
@@ -947,14 +1136,11 @@ struct HideCursor {
         NO,
         kCGRenderingIntentDefault);
 
-    auto* image = [[NSImage alloc] initWithCGImage:bitmap_image size:NSZeroSize];
-    [image drawInRect:image_rect];
+    layer.contentsScale = m_web_view_bridge->device_pixel_ratio();
+    layer.contents = (__bridge id)bitmap_image;
 
-    CGContextRestoreGState(context);
     CGDataProviderRelease(provider);
     CGImageRelease(bitmap_image);
-
-    [super drawRect:rect];
 }
 
 - (void)viewDidMoveToWindow
@@ -987,18 +1173,31 @@ struct HideCursor {
 
 - (void)mouseExited:(NSEvent*)event
 {
-    Web::MouseEvent mouse_event { Web::MouseEvent::Type::MouseLeave, {}, {}, Web::UIEvents::MouseButton::None, Web::UIEvents::MouseButton::None, Web::UIEvents::KeyModifier::Mod_None, 0, 0, nullptr };
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_web_view_bridge->clear_node_picker();
+        return;
+    }
+
+    Web::MouseEvent mouse_event { Web::MouseEvent::Type::MouseLeave, {}, {}, Web::UIEvents::MouseButton::None, Web::UIEvents::MouseButton::None, Web::UIEvents::KeyModifier::Mod_None, 0, 0, 0, nullptr };
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)mouseMoved:(NSEvent*)event
 {
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::None);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_web_view_bridge->node_picker_hover(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        return;
+    }
+
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)scrollWheel:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseWheel, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1008,17 +1207,31 @@ struct HideCursor {
     [[self window] makeFirstResponder:self];
 
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Primary);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        if ((event.modifierFlags & NSEventModifierFlagCommand) != 0)
+            m_web_view_bridge->node_picker_preview(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        else
+            m_web_view_bridge->node_picker_pick(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        return;
+    }
+
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Primary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)mouseDragged:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Primary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1027,18 +1240,27 @@ struct HideCursor {
 {
     [[self window] makeFirstResponder:self];
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)rightMouseUp:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)rightMouseDragged:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1050,6 +1272,9 @@ struct HideCursor {
 
     [[self window] makeFirstResponder:self];
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1059,6 +1284,9 @@ struct HideCursor {
     if (event.buttonNumber != 2)
         return;
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1066,6 +1294,9 @@ struct HideCursor {
 - (void)otherMouseDragged:(NSEvent*)event
 {
     if (event.buttonNumber != 2)
+        return;
+
+    if (m_web_view_bridge->is_node_picker_active())
         return;
 
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Middle);
@@ -1083,6 +1314,9 @@ struct HideCursor {
     if (self.event_being_redispatched == event) {
         return NO;
     }
+    if (is_browser_reserved_key_equivalent(event)) {
+        return NO;
+    }
 
     [self keyDown:event];
     return YES;
@@ -1091,6 +1325,13 @@ struct HideCursor {
 - (void)keyDown:(NSEvent*)event
 {
     if (self.event_being_redispatched == event) {
+        return;
+    }
+
+    if (m_web_view_bridge->is_node_picker_active()) {
+        auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, event);
+        if (key_event.key == Web::UIEvents::KeyCode::Key_Escape)
+            m_web_view_bridge->node_picker_cancel();
         return;
     }
 
@@ -1104,6 +1345,9 @@ struct HideCursor {
         return;
     }
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyUp, event);
     m_web_view_bridge->enqueue_input_event(move(key_event));
 }
@@ -1111,6 +1355,11 @@ struct HideCursor {
 - (void)flagsChanged:(NSEvent*)event
 {
     if (self.event_being_redispatched == event) {
+        return;
+    }
+
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_modifier_flags = event.modifierFlags;
         return;
     }
 
@@ -1161,35 +1410,76 @@ struct HideCursor {
 
 - (void)insertText:(id)string replacementRange:(NSRange)replacementRange
 {
-    [self handleCurrentKeyDownEvent];
+    // macOS calls this for both regular typing (the typed character routed through interpretKeyEvents:) and for CJK
+    // input methods committing a composition.
+    //
+    // For regular typing, the original NSEvent in current_key_down_event has the same character. Forward the NSEvent —
+    // so JS sees keydown/keypress/input events (the existing path). For IME commits, the committed text differs from
+    // the trigger key (or there is no current event) — so, route the committed text directly into the focused element.
+    NSString* committed = [string isKindOfClass:[NSAttributedString class]] ? [(NSAttributedString*)string string] : (NSString*)string;
+    NSEvent* event = self.current_key_down_event;
+    bool matches_current_key_event = event && committed.length > 0 && [committed isEqualToString:event.characters];
+    bool has_marked_text = self.marked_text_length > 0;
+    if ((!matches_current_key_event && committed.length > 0) || has_marked_text) {
+        auto utf8 = ByteString { committed.length > 0 ? [committed UTF8String] : "" };
+        m_web_view_bridge->commit_text_from_input_method(Utf16String::from_utf8(utf8));
+        self.marked_text_length = 0;
+        self.current_key_down_event = nil;
+        return;
+    }
+    [self handleCurrentKeyDownEvent:YES];
 }
 
 - (void)doCommandBySelector:(SEL)selector
 {
-    [self handleCurrentKeyDownEvent];
+    [self handleCurrentKeyDownEvent:NO];
 }
 
 - (BOOL)hasMarkedText
 {
-    return NO;
+    return self.marked_text_length > 0;
 }
 
 - (NSRange)markedRange
 {
-    return NSMakeRange(NSNotFound, 0);
+    return self.marked_text_length > 0 ? NSMakeRange(0, self.marked_text_length) : NSMakeRange(NSNotFound, 0);
 }
 
 - (NSRange)selectedRange
 {
-    return NSMakeRange(NSNotFound, 0);
+    // We present the input method with a virtual text model whose marked text occupies [0, marked_text_length) with
+    // the caret at its end; keep selectedRange consistent with markedRange, so the IME's range bookkeeping is coherent.
+    return NSMakeRange(self.marked_text_length, 0);
 }
 
 - (void)setMarkedText:(id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange
 {
+    // Called by the input method as the user types each composing character. We present inline preedit by inserting the
+    // marked text into the focused editable. LibWeb owns the marked-text range and replaces the previous preedit on
+    // each subsequent setMarkedText, or on commit (insertText) or abort (unmarkText). We keep marked_text_length only
+    // to answer the NSTextInputClient range queries (markedRange/selectedRange/hasMarkedText).
+    NSString* preedit = [string isKindOfClass:[NSAttributedString class]] ? [(NSAttributedString*)string string] : (NSString*)string;
+    auto utf8 = ByteString { preedit.length > 0 ? [preedit UTF8String] : "" };
+    m_web_view_bridge->set_marked_text_from_input_method(Utf16String::from_utf8(utf8));
+    self.marked_text_length = preedit.length;
 }
 
 - (void)unmarkText
 {
+    // Per the NSTextInputClient contract, unmarkText finalizes (commits) the marked text in place. Tell LibWeb to end
+    // the composition — keeping the inserted text, and forgetting our marked-text length.
+    m_web_view_bridge->unmark_text_from_input_method();
+    self.marked_text_length = 0;
+}
+
+- (void)inputSourceDidChange:(NSNotification*)notification
+{
+    // When the keyboard input source changes mid-composition, the input method may not send a commit/abort callback for
+    // our pending preedit. Finalize it in place: end the composition in LibWeb (keeping the text), and forget the
+    // marked-text length — so a later composition doesn't replace the wrong characters.
+    (void)notification;
+    m_web_view_bridge->unmark_text_from_input_method();
+    self.marked_text_length = 0;
 }
 
 - (NSArray<NSAttributedStringKey>*)validAttributesForMarkedText
@@ -1209,7 +1499,22 @@ struct HideCursor {
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange
 {
-    return NSZeroRect;
+    // Tells macOS where to anchor IME overlays (candidate window, accent menu, etc.). Otherwise, without this, the
+    // overlays appear in the bottom-left corner of the screen — since NSZeroRect anchors at screen origin.
+    auto caret_rect = m_web_view_bridge->get_input_caret_rect();
+    if (!caret_rect.has_value())
+        return NSZeroRect;
+
+    auto dpr = m_web_view_bridge->device_pixel_ratio();
+    NSRect view_rect = NSMakeRect(
+        caret_rect->x().value() / dpr,
+        caret_rect->y().value() / dpr,
+        caret_rect->width().value() / dpr,
+        caret_rect->height().value() / dpr);
+
+    // Convert: view coords (flipped, top-left origin) → window coords → screen coords.
+    NSRect window_rect = [self convertRect:view_rect toView:nil];
+    return [[self window] convertRectToScreen:window_rect];
 }
 
 #pragma mark - NSDraggingDestination
@@ -1251,27 +1556,27 @@ struct HideCursor {
 
 - (void)onPinch:(NSMagnificationGestureRecognizer*)recognizer
 {
-    double scale_delta = 0;
     switch (recognizer.state) {
     case NSGestureRecognizerStateBegan:
-        m_web_view_bridge->pinch_state() = { .previous_scale = recognizer.magnification };
-        break;
+        recognizer.magnification = 0;
+        return;
     case NSGestureRecognizerStateChanged:
-        scale_delta = recognizer.magnification - m_web_view_bridge->pinch_state()->previous_scale;
-        m_web_view_bridge->pinch_state()->previous_scale = recognizer.magnification;
         break;
     case NSGestureRecognizerStateEnded:
     case NSGestureRecognizerStateCancelled:
-        scale_delta = recognizer.magnification - m_web_view_bridge->pinch_state()->previous_scale;
-        m_web_view_bridge->pinch_state() = {};
-        break;
+        recognizer.magnification = 0;
+        return;
     default:
         return;
     }
 
+    auto scale_delta = recognizer.magnification;
+    recognizer.magnification = 0;
+
     NSPoint point = [recognizer locationInView:self];
     Web::PinchEvent pinch_event;
     pinch_event.position = Ladybird::ns_point_to_gfx_point(point).to_type<Web::DevicePixels>() * m_web_view_bridge->device_pixel_ratio();
+    pinch_event.modifiers = Ladybird::ns_modifiers_to_key_modifiers([NSEvent modifierFlags]);
     pinch_event.scale_delta = scale_delta;
     m_web_view_bridge->enqueue_input_event(move(pinch_event));
 }

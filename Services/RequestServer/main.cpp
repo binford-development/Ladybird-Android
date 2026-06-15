@@ -19,23 +19,21 @@
 #include <RequestServer/ConnectionFromClient.h>
 #include <RequestServer/Resolver.h>
 #include <RequestServer/ResourceSubstitutionMap.h>
-
-#if defined(AK_OS_MACOS)
-#    include <LibCore/Platform/ProcessStatisticsMach.h>
-#endif
+#include <RequestServer/Sandbox.h>
 
 namespace RequestServer {
 
-extern Optional<HTTP::DiskCache> g_disk_cache;
 OwnPtr<ResourceSubstitutionMap> g_resource_substitution_map;
 
 }
 
+#ifndef AK_OS_WINDOWS
 static void handle_signal(int signal)
 {
     VERIFY(signal == SIGINT || signal == SIGTERM);
     Core::EventLoop::current().quit(0);
 }
+#endif
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
@@ -46,6 +44,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     StringView http_disk_cache_mode;
     StringView resource_map_path;
     bool wait_for_debugger = false;
+    bool enable_sandbox = false;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(certificates, "Path to a certificate file", "certificate", 'C', "certificate");
@@ -53,6 +52,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(http_disk_cache_mode, "HTTP disk cache mode", "http-disk-cache-mode", 0, "mode");
     args_parser.add_option(resource_map_path, "Path to JSON file mapping URLs to local files", "resource-map", 0, "path");
     args_parser.add_option(wait_for_debugger, "Wait for debugger", "wait-for-debugger");
+    args_parser.add_option(enable_sandbox, "Enable process sandboxing", "enable-sandbox");
     args_parser.parse(arguments);
 
     if (wait_for_debugger)
@@ -70,14 +70,18 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             RequestServer::g_resource_substitution_map = map.release_value();
     }
 
-    Core::EventLoop event_loop;
+#if !defined(AK_OS_WINDOWS)
+    MUST(Core::System::signal(SIGPIPE, SIG_IGN));
+#endif
+
+    auto& event_loop = Core::EventLoop::initialize_for_current_thread();
+    // FIXME: Have another way to signal the event loop to gracefully quit on windows.
+#ifndef AK_OS_WINDOWS
     Core::EventLoop::register_signal(SIGINT, handle_signal);
     Core::EventLoop::register_signal(SIGTERM, handle_signal);
-
-#if defined(AK_OS_MACOS)
-    if (!mach_server_name.is_empty())
-        Core::Platform::register_with_mach_server(mach_server_name);
 #endif
+
+    Optional<HTTP::DiskCache> disk_cache;
 
     if (http_disk_cache_mode != "disabled"sv) {
         auto mode = TRY([&]() -> ErrorOr<HTTP::DiskCache::Mode> {
@@ -93,16 +97,19 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         if (auto cache = HTTP::DiskCache::create(mode); cache.is_error())
             warnln("Unable to create disk cache: {}", cache.error());
         else
-            RequestServer::g_disk_cache = cache.release_value();
+            disk_cache = cache.release_value();
     }
 
-    // Connections are stored on the stack to ensure they are destroyed before
-    // static destruction begins. This prevents crashes from notifiers trying to
-    // unregister from already-destroyed thread data during process exit.
-    HashMap<int, NonnullRefPtr<RequestServer::ConnectionFromClient>> connections;
-    RequestServer::ConnectionFromClient::set_connections(connections);
+    if (enable_sandbox)
+        TRY(RequestServer::apply_sandbox(certificates));
 
-    auto client = TRY(IPC::take_over_accepted_client_from_system_server<RequestServer::ConnectionFromClient>());
+    // Connections are stored on the stack to ensure they are destroyed before static destruction begins. This prevents
+    // crashes from notifiers trying to unregister from already-destroyed thread data during process exit.
+    RequestServer::ConnectionFromClient::ConnectionMap connections;
+
+    auto client = TRY(IPC::take_over_accepted_client_from_system_server<RequestServer::ConnectionFromClient>(
+        mach_server_name,
+        RequestServer::ConnectionFromClient::IsPrimaryConnection::Yes, connections, disk_cache));
 
     return event_loop.exec();
 }

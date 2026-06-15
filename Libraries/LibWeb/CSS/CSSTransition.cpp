@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/Animations/DocumentTimeline.h>
-#include <LibWeb/Bindings/CSSTransitionPrototype.h>
+#include <LibWeb/Bindings/CSSTransition.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/CSSTransition.h>
@@ -20,9 +20,17 @@ namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSTransition);
 
-GC::Ref<CSSTransition> CSSTransition::start_a_transition(DOM::AbstractElement abstract_element, PropertyID property_id,
-    size_t transition_generation, double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value,
-    NonnullRefPtr<StyleValue const> end_value, NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+GC::Ref<CSSTransition> CSSTransition::start_a_transition(
+    DOM::AbstractElement abstract_element,
+    PropertyID property_id,
+    size_t transition_generation,
+    double delay,
+    double start_time,
+    double end_time,
+    NonnullRefPtr<StyleValue const> start_value,
+    NonnullRefPtr<StyleValue const> end_value,
+    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+    double reversing_shortening_factor)
 {
     auto& realm = abstract_element.element().realm();
     return realm.create<CSSTransition>(realm, abstract_element, property_id, transition_generation, delay, start_time, end_time, start_value, end_value, reversing_adjusted_start_value, reversing_shortening_factor);
@@ -81,9 +89,18 @@ int CSSTransition::class_specific_composite_order(GC::Ref<Animations::Animation>
     return transition_property().compare(other->transition_property());
 }
 
-CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_element, PropertyID property_id, size_t transition_generation,
-    double delay, double start_time, double end_time, NonnullRefPtr<StyleValue const> start_value, NonnullRefPtr<StyleValue const> end_value,
-    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value, double reversing_shortening_factor)
+CSSTransition::CSSTransition(
+    JS::Realm& realm,
+    DOM::AbstractElement abstract_element,
+    PropertyID property_id,
+    size_t transition_generation,
+    double delay,
+    double start_time,
+    double end_time,
+    NonnullRefPtr<StyleValue const> start_value,
+    NonnullRefPtr<StyleValue const> end_value,
+    NonnullRefPtr<StyleValue const> reversing_adjusted_start_value,
+    double reversing_shortening_factor)
     : Animations::Animation(realm)
     , m_transition_property(property_id)
     , m_transition_generation(transition_generation)
@@ -105,6 +122,10 @@ CSSTransition::CSSTransition(JS::Realm& realm, DOM::AbstractElement abstract_ele
     m_keyframe_effect->set_target(abstract_element);
     m_keyframe_effect->set_specified_start_delay(delay);
     m_keyframe_effect->set_specified_iteration_duration(end_time - start_time);
+    // AD-HOC: CSS Transitions require the start value to apply during transition-delay. A default KeyframeEffect does
+    //         not fill in the before phase, so use backwards fill to keep the transition value in the cascade until
+    //         the active interval starts.
+    m_keyframe_effect->set_fill_mode(Bindings::FillMode::Backwards);
     // https://drafts.csswg.org/web-animations-2/#updating-animationeffect-timing
     // Timing properties may also be updated due to a style change. Any change to a CSS animation property that affects
     // timing requires rerunning the procedure to normalize specified timing.
@@ -146,11 +167,11 @@ void CSSTransition::visit_edges(Cell::Visitor& visitor)
 
 double CSSTransition::timing_function_output_at_time(double t) const
 {
-    auto progress = (t - transition_start_time()) / (transition_end_time() - transition_start_time());
     // AD-HOC: If the transition has an empty duration then we get NaN here,
     // setting progress to 1 because an instant transition may be considered "finished".
+    double progress = 1;
     if (transition_start_time() < transition_end_time())
-        progress = 1;
+        progress = (t - transition_start_time()) / (transition_end_time() - transition_start_time());
 
     // FIXME: Is this before_flag value correct?
     bool before_flag = t < transition_start_time();

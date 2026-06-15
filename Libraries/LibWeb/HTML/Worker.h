@@ -26,17 +26,16 @@ class Worker
     GC_DECLARE_ALLOCATOR(Worker);
 
 public:
-    static WebIDL::ExceptionOr<GC::Ref<Worker>> create(TrustedTypes::TrustedScriptURLOrString const& script_url, WorkerOptions const& options, DOM::Document& document);
-    static WebIDL::ExceptionOr<GC::Ref<Worker>> construct_impl(JS::Realm& realm, TrustedTypes::TrustedScriptURLOrString const& script_url, WorkerOptions const& options)
+    static WebIDL::ExceptionOr<GC::Ref<Worker>> create(JS::Realm& realm, TrustedTypes::TrustedScriptURLOrString const& script_url, Bindings::WorkerOptions const& options);
+    static WebIDL::ExceptionOr<GC::Ref<Worker>> construct_impl(JS::Realm& realm, TrustedTypes::TrustedScriptURLOrString const& script_url, Bindings::WorkerOptions const& options)
     {
-        auto& window = as<HTML::Window>(realm.global_object());
-        return Worker::create(script_url, options, window.associated_document());
+        return Worker::create(realm, script_url, options);
     }
 
     WebIDL::ExceptionOr<void> terminate();
 
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, StructuredSerializeOptions const&);
-    WebIDL::ExceptionOr<void> post_message(JS::Value message, Vector<GC::Root<JS::Object>> const& transfer);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, Bindings::StructuredSerializeOptions const&);
+    WebIDL::ExceptionOr<void> post_message(JS::Value message, GC::RootVector<GC::Ref<JS::Object>> const& transfer);
 
     virtual ~Worker() = default;
 
@@ -52,7 +51,7 @@ public:
 #undef __ENUMERATE
 
 protected:
-    Worker(String const&, WorkerOptions const&, DOM::Document&);
+    Worker(JS::Realm&, String const&, Bindings::WorkerOptions const&);
 
     // ^AbstractWorker
     virtual DOM::EventTarget& this_event_target() override { return *this; }
@@ -62,13 +61,13 @@ private:
     virtual void visit_edges(Cell::Visitor&) override;
 
     String m_script_url;
-    WorkerOptions m_options;
+    Bindings::WorkerOptions m_options;
 
     GC::Ptr<MessagePort> m_outside_port;
 
     GC::Ptr<WorkerAgentParent> m_agent;
 };
 
-void run_a_worker(Variant<GC::Ref<Worker>, GC::Ref<SharedWorker>> worker, URL::URL& url, EnvironmentSettingsObject& outside_settings, GC::Ptr<MessagePort> outside_port, WorkerOptions const& options);
+void run_a_worker(Variant<GC::Ref<Worker>, GC::Ref<SharedWorker>> worker, URL::URL& url, EnvironmentSettingsObject& outside_settings, GC::Ptr<MessagePort> outside_port, Bindings::WorkerOptions const& options);
 
 }

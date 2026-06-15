@@ -34,12 +34,18 @@ public:
         Keyframe = 8,
         Margin = 9,
         Namespace = 10,
+        CounterStyle = 11,
         Supports = 12,
+        FontFeatureValues = 14,
         // AD-HOC: These are not included in the spec, but we need them internally. So, their numbers are arbitrary.
         LayerBlock = 100,
         LayerStatement = 101,
         NestedDeclarations = 102,
         Property = 103,
+        Function = 104,
+        FunctionDeclarations = 105,
+        Container = 106,
+        Scope = 107,
     };
 
     Type type() const { return m_type; }
@@ -53,7 +59,11 @@ public:
     void set_parent_rule(CSSRule*);
 
     CSSStyleSheet* parent_style_sheet() { return m_parent_style_sheet.ptr(); }
-    virtual void set_parent_style_sheet(CSSStyleSheet*);
+    CSSStyleSheet const* parent_style_sheet() const { return m_parent_style_sheet.ptr(); }
+    MUST_UPCALL virtual void set_parent_style_sheet(CSSStyleSheet*);
+
+    Optional<SourcePosition> const& source_location() const { return m_source_position; }
+    void set_source_position(Optional<SourcePosition> source_location) { m_source_position = move(source_location); }
 
     template<typename T>
     bool fast_is() const = delete;
@@ -61,9 +71,9 @@ public:
     // https://drafts.csswg.org/cssom-1/#serialize-a-css-rule
     virtual String serialized() const = 0;
 
-    virtual void dump(StringBuilder&, int indent_levels = 0) const;
+    MUST_UPCALL virtual void dump(StringBuilder&, int indent_levels = 0) const;
 
-    virtual void clear_caches();
+    MUST_UPCALL virtual void clear_caches();
 
 protected:
     CSSRule(JS::Realm&, Type);
@@ -81,6 +91,7 @@ protected:
     GC::Ptr<CSSRule> m_parent_rule;
     GC::Ptr<CSSStyleSheet> m_parent_style_sheet;
 
+    Optional<SourcePosition> m_source_position;
     mutable Optional<FlyString> m_cached_layer_name;
 };
 

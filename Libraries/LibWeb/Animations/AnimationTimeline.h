@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibGC/WeakHashSet.h>
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Animations/TimeValue.h>
 #include <LibWeb/Bindings/PlatformObject.h>
@@ -22,7 +23,7 @@ public:
 
     NullableCSSNumberish current_time_for_bindings() const
     {
-        return NullableCSSNumberish::from_optional_css_numberish_time(current_time());
+        return NullableCSSNumberish::from_optional_css_numberish_time(realm(), current_time());
     }
     Optional<TimeValue> current_time() const;
 
@@ -31,28 +32,29 @@ public:
     NullableCSSNumberish duration_for_bindings() const;
     virtual Optional<TimeValue> duration() const = 0;
 
-    GC::Ptr<DOM::Document> associated_document() const { return m_associated_document; }
-    void set_associated_document(GC::Ptr<DOM::Document>);
+    GC::Ref<DOM::Document> associated_document() const { return m_associated_document; }
 
     virtual bool is_inactive() const;
     bool is_monotonically_increasing() const { return m_is_monotonically_increasing; }
+    virtual bool is_progress_based() const { return false; }
 
     // https://www.w3.org/TR/web-animations-1/#timeline-time-to-origin-relative-time
     virtual Optional<double> convert_a_timeline_time_to_an_origin_relative_time(Optional<TimeValue>) { VERIFY_NOT_REACHED(); }
     virtual bool can_convert_a_timeline_time_to_an_origin_relative_time() const { return false; }
 
-    void associate_with_animation(GC::Ref<Animation> value) { m_associated_animations.set(value); }
-    void disassociate_with_animation(GC::Ref<Animation> value) { m_associated_animations.remove(value); }
-    HashTable<GC::Weak<Animation>> const& associated_animations() const { return m_associated_animations; }
+    void associate_with_animation(GC::Ref<Animation> value) { m_associated_animations.set(*value); }
+    void disassociate_with_animation(GC::Ref<Animation> value) { m_associated_animations.remove(*value); }
+    GC::WeakHashSet<Animation> const& associated_animations() const { return m_associated_animations; }
 
 protected:
-    AnimationTimeline(JS::Realm&);
+    AnimationTimeline(JS::Realm&, GC::Ref<DOM::Document>);
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
     virtual void finalize() override;
 
     void set_current_time(Optional<TimeValue> value);
+    void update_associated_animations();
 
     // https://www.w3.org/TR/web-animations-1/#dom-animationtimeline-currenttime
     Optional<TimeValue> m_current_time {};
@@ -61,9 +63,9 @@ protected:
     bool m_is_monotonically_increasing { false };
 
     // https://www.w3.org/TR/web-animations-1/#timeline-associated-with-a-document
-    GC::Ptr<DOM::Document> m_associated_document {};
+    GC::Ref<DOM::Document> m_associated_document;
 
-    HashTable<GC::Weak<Animation>> m_associated_animations {};
+    GC::WeakHashSet<Animation> m_associated_animations;
 };
 
 }

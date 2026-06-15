@@ -6,7 +6,7 @@
 
 #include <AK/Debug.h>
 #include <LibJS/Runtime/Realm.h>
-#include <LibWeb/Bindings/WorkerPrototype.h>
+#include <LibWeb/Bindings/Worker.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
@@ -20,8 +20,8 @@ namespace Web::HTML {
 GC_DEFINE_ALLOCATOR(Worker);
 
 // https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface
-Worker::Worker(String const& script_url, WorkerOptions const& options, DOM::Document& document)
-    : DOM::EventTarget(document.realm())
+Worker::Worker(JS::Realm& realm, String const& script_url, Bindings::WorkerOptions const& options)
+    : DOM::EventTarget(realm)
     , m_script_url(script_url)
     , m_options(options)
 {
@@ -41,8 +41,7 @@ void Worker::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#dom-worker
-// https://whatpr.org/html/9893/workers.html#dom-worker
-WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptURLOrString const& script_url, WorkerOptions const& options, DOM::Document& document)
+WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(JS::Realm& realm, TrustedTypes::TrustedScriptURLOrString const& script_url, Bindings::WorkerOptions const& options)
 {
     // Returns a new Worker object. scriptURL will be fetched and executed in the background,
     // creating a new global environment for which worker represents the communication channel.
@@ -53,10 +52,9 @@ WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptU
 
     // 1. Let compliantScriptURL be the result of invoking the Get Trusted Type compliant string algorithm with
     //    TrustedScriptURL, this's relevant global object, scriptURL, "Worker constructor", and "script".
-    // FIXME: We don't have a `this` yet, so use the document.
     auto const compliant_script_url = TRY(TrustedTypes::get_trusted_type_compliant_string(
         TrustedTypes::TrustedTypeName::TrustedScriptURL,
-        HTML::relevant_global_object(document),
+        realm.global_object(),
         script_url,
         TrustedTypes::InjectionSink::Worker_constructor,
         TrustedTypes::Script.to_string()));
@@ -64,8 +62,8 @@ WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptU
     dbgln_if(WEB_WORKER_DEBUG, "WebWorker: Creating worker with compliant_script_url = {}", compliant_script_url);
 
     // 2. Let outsideSettings be this's relevant settings object.
-    // FIXME: We don't have a `this` yet, so use the document.
-    auto& outside_settings = relevant_settings_object(document);
+    // NOTE: We don't have a `this` yet, so we use the definition: the environment setting object of the realm.
+    auto& outside_settings = HTML::principal_realm_settings_object(realm);
 
     // 3. Let workerURL be the result of encoding-parsing a URL given compliantScriptURL, relative to outsideSettings.
     auto worker_url = outside_settings.encoding_parse_url(compliant_script_url.to_utf8_but_should_be_ported_to_utf16());
@@ -73,7 +71,7 @@ WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptU
     // 4. If workerURL is failure, then throw a "SyntaxError" DOMException.
     if (!worker_url.has_value()) {
         dbgln_if(WEB_WORKER_DEBUG, "WebWorker: Invalid URL loaded '{}'.", compliant_script_url);
-        return WebIDL::SyntaxError::create(document.realm(), "url is not valid"_utf16);
+        return WebIDL::SyntaxError::create(realm, "url is not valid"_utf16);
     }
 
     // 5. Let outsidePort be a new MessagePort in outsideSettings's realm.
@@ -81,7 +79,7 @@ WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptU
 
     // 8. Let worker be this.
     // AD-HOC: AD-HOC: We do this first so that we can use `this`.
-    auto worker = document.realm().create<Worker>(compliant_script_url.to_utf8_but_should_be_ported_to_utf16(), options, document);
+    auto worker = realm.create<Worker>(realm, compliant_script_url.to_utf8_but_should_be_ported_to_utf16(), options);
 
     // 6. Set outsidePort's message event target to this.
     outside_port->set_worker_event_target(worker);
@@ -100,23 +98,22 @@ WebIDL::ExceptionOr<GC::Ref<Worker>> Worker::create(TrustedTypes::TrustedScriptU
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#run-a-worker
-void run_a_worker(Variant<GC::Ref<Worker>, GC::Ref<SharedWorker>> worker, URL::URL& url, EnvironmentSettingsObject& outside_settings, GC::Ptr<MessagePort> port, WorkerOptions const& options)
+void run_a_worker(Variant<GC::Ref<Worker>, GC::Ref<SharedWorker>> worker, URL::URL& url, EnvironmentSettingsObject& outside_settings, GC::Ptr<MessagePort> port, Bindings::WorkerOptions const& options)
 {
     // 1. Let is shared be true if worker is a SharedWorker object, and false otherwise.
     Bindings::AgentType agent_type = worker.has<GC::Ref<SharedWorker>>() ? Bindings::AgentType::SharedWorker : Bindings::AgentType::DedicatedWorker;
 
-    // 2. Let owner be the relevant owner to add given outside settings.
-    // FIXME: Support WorkerGlobalScope options
-    if (!is<HTML::WindowEnvironmentSettingsObject>(outside_settings))
-        TODO();
+    // FIXME: 2. Let owner be the relevant owner to add given outside settings.
 
     // 3. Let unsafeWorkerCreationTime be the unsafe shared current time.
 
     // 4. Let agent be the result of obtaining a dedicated/shared worker agent given outside settings and is shared.
     //    Run the rest of these steps in that agent.
 
+    auto event_target = worker.visit([](auto& worker) -> GC::Ref<DOM::EventTarget> { return worker; });
+
     // Note: This spawns a new process to act as the 'agent' for the worker.
-    auto agent = outside_settings.realm().create<WorkerAgentParent>(url, options, port, outside_settings, agent_type);
+    auto agent = outside_settings.realm().create<WorkerAgentParent>(url, options, port, outside_settings, event_target, agent_type);
     worker.visit([&](auto worker) { worker->set_agent(agent); });
 }
 
@@ -130,7 +127,7 @@ WebIDL::ExceptionOr<void> Worker::terminate()
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#dom-worker-postmessage
-WebIDL::ExceptionOr<void> Worker::post_message(JS::Value message, StructuredSerializeOptions const& options)
+WebIDL::ExceptionOr<void> Worker::post_message(JS::Value message, Bindings::StructuredSerializeOptions const& options)
 {
     dbgln_if(WEB_WORKER_DEBUG, "WebWorker: Post Message: {}", message);
 
@@ -142,7 +139,7 @@ WebIDL::ExceptionOr<void> Worker::post_message(JS::Value message, StructuredSeri
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#dom-worker-postmessage
-WebIDL::ExceptionOr<void> Worker::post_message(JS::Value message, Vector<GC::Root<JS::Object>> const& transfer)
+WebIDL::ExceptionOr<void> Worker::post_message(JS::Value message, GC::RootVector<GC::Ref<JS::Object>> const& transfer)
 {
     // The postMessage(message, transfer) and postMessage(message, options) methods on Worker objects act as if,
     // when invoked, they immediately invoked the respective postMessage(message, transfer) and

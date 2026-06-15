@@ -26,7 +26,7 @@ class GC_API HeapBlock : public HeapBlockBase {
 
 public:
     using HeapBlockBase::BLOCK_SIZE;
-    static NonnullOwnPtr<HeapBlock> create_with_cell_size(Heap&, CellAllocator&, size_t cell_size, StringView class_name, bool overrides_must_survive_garbage_collection, bool overrides_finalize);
+    static NonnullOwnPtr<HeapBlock> create_with_cell_size(Heap&, CellAllocator&, size_t cell_size, bool overrides_must_survive_garbage_collection, bool overrides_finalize);
 
     size_t cell_size() const { return m_cell_size; }
     size_t cell_count() const { return (HeapBlock::BLOCK_SIZE - sizeof(HeapBlock)) / m_cell_size; }
@@ -89,6 +89,7 @@ public:
     }
 
     IntrusiveListNode<HeapBlock> m_list_node;
+    IntrusiveListNode<HeapBlock> m_sweep_list_node;
 
     CellAllocator& cell_allocator() { return m_cell_allocator; }
 

@@ -141,6 +141,7 @@ public:
 
     static Optional<float> parse_coordinate(StringView input);
     static Optional<float> parse_length(StringView input);
+    static Optional<i32> parse_integer(StringView input);
     static Optional<NumberPercentage> parse_number_percentage(StringView input);
     static Optional<float> parse_positive_length(StringView input);
     static Vector<Gfx::FloatPoint> parse_points(StringView input);
@@ -171,25 +172,31 @@ private:
 
     ErrorOr<float> parse_length();
     ErrorOr<float> parse_coordinate();
-    ErrorOr<Vector<float>> parse_coordinate_pair();
-    ErrorOr<Vector<float>> parse_coordinate_sequence();
-    ErrorOr<Vector<Vector<float>>> parse_coordinate_pair_sequence();
-    ErrorOr<Vector<float>> parse_coordinate_pair_double();
-    ErrorOr<Vector<float>> parse_coordinate_pair_triplet();
-    ErrorOr<Vector<float>> parse_elliptical_arc_argument();
+    ErrorOr<i32> parse_integer();
+    ErrorOr<Gfx::FloatPoint> parse_coordinate_pair();
+    ErrorOr<void> parse_coordinate_sequence(Function<void(float)> const& callback);
+    ErrorOr<void> parse_coordinate_pair_sequence(Function<void(Gfx::FloatPoint)> const& callback);
+    ErrorOr<Vector<Gfx::FloatPoint, 2>> parse_coordinate_pair_double();
+    ErrorOr<Vector<Gfx::FloatPoint, 3>> parse_coordinate_pair_triplet();
     void parse_whitespace(bool must_match_once = false);
     void parse_comma_whitespace();
     ErrorOr<float> parse_number();
     ErrorOr<float> parse_nonnegative_number();
-    ErrorOr<float> parse_flag();
+    ErrorOr<bool> parse_flag();
     // -1 if negative, +1 otherwise
     int parse_sign();
+
+    enum class AllowDot {
+        No,
+        Yes,
+    };
 
     bool match_whitespace() const;
     bool match_comma_whitespace() const;
     bool match_coordinate() const;
-    bool match_length() const;
+    bool match_length(AllowDot allow_dot) const;
     bool match_number() const;
+    bool match_integer() const;
     bool match(char c) const { return !done() && ch() == c; }
 
     bool done() const { return m_lexer.is_eof(); }

@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLLIElementPrototype.h>
+#include <LibWeb/Bindings/HTMLLIElement.h>
 #include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleValues/CounterStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/HTML/HTMLLIElement.h>
 #include <LibWeb/HTML/Numbers.h>
@@ -65,29 +66,31 @@ bool HTMLLIElement::is_presentational_hint(FlyString const& name) const
     return name == HTML::AttributeNames::type;
 }
 
-void HTMLLIElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLLIElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
+    Base::apply_presentational_hints(properties);
+
     // https://html.spec.whatwg.org/multipage/rendering.html#lists
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::type) {
             if (value == "1"sv) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Decimal));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("decimal"_fly_string) });
             } else if (value == "a"sv) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::LowerAlpha));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("lower-alpha"_fly_string) });
             } else if (value == "A"sv) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::UpperAlpha));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("upper-alpha"_fly_string) });
             } else if (value == "i"sv) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::LowerRoman));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("lower-roman"_fly_string) });
             } else if (value == "I"sv) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::UpperRoman));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("upper-roman"_fly_string) });
             } else if (value.equals_ignoring_ascii_case("none"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::None));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::KeywordStyleValue::create(CSS::Keyword::None) });
             } else if (value.equals_ignoring_ascii_case("disc"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Disc));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("disc"_fly_string) });
             } else if (value.equals_ignoring_ascii_case("circle"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Circle));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("circle"_fly_string) });
             } else if (value.equals_ignoring_ascii_case("square"sv)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::ListStyleType, CSS::KeywordStyleValue::create(CSS::Keyword::Square));
+                properties.append({ .property_id = CSS::PropertyID::ListStyleType, .value = CSS::CounterStyleStyleValue::create("square"_fly_string) });
             }
         }
     });

@@ -5,9 +5,11 @@
  */
 
 #include <LibWeb/DOM/CDATASection.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentType.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/ProcessingInstruction.h>
+#include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/HTMLTemplateElement.h>
 #include <LibWeb/HTML/Parser/Entities.h>
 #include <LibWeb/HTML/Parser/NamedCharacterReferences.h>
@@ -44,7 +46,6 @@ Optional<String> resolve_named_html_entity(StringView entity_name)
 
 XMLDocumentBuilder::XMLDocumentBuilder(DOM::Document& document, XMLScriptingSupport scripting_support)
     : m_document(document)
-    , m_template_node_stack(document.realm().heap())
     , m_current_node(m_document)
     , m_scripting_support(scripting_support)
 {
@@ -306,8 +307,9 @@ void XMLDocumentBuilder::document_end()
     // Pop all the nodes off the stack of open elements.
     // NOTE: Noop.
 
-    if (!m_document->browsing_context()) {
-        // Parsed via DOMParser, no need to wait for load events.
+    if (!m_document->browsing_context() || m_document->is_decoded_svg()) {
+        // No need to spin the event loop waiting for scripts or load events
+        // when parsed via DOMParser or as a decoded SVG image.
         m_document->update_readiness(HTML::DocumentReadyState::Complete);
         return;
     }
@@ -380,7 +382,7 @@ void XMLDocumentBuilder::document_end()
         // FIXME: Set the Document object's navigation id to null.
 
         // Set the Document's load timing info's load event end time to the current high resolution time given window.
-        document->load_timing_info().dom_content_loaded_event_end_time = HighResolutionTime::current_high_resolution_time(window);
+        document->load_timing_info().load_event_end_time = HighResolutionTime::current_high_resolution_time(window);
 
         // Assert: Document's page showing is false.
         VERIFY(!document->page_showing());

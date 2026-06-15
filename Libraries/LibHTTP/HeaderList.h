@@ -8,7 +8,6 @@
 #pragma once
 
 #include <AK/ByteString.h>
-#include <AK/HashTable.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
 #include <AK/RefCounted.h>
@@ -50,6 +49,14 @@ public:
     struct ExtractLengthFailure { };
     [[nodiscard]] Variant<Empty, u64, ExtractLengthFailure> extract_length() const;
 
+    struct ExtractContentRangeFailure { };
+    struct ContentRangeValues {
+        u64 first_byte_pos { 0 };
+        u64 last_byte_pos { 0 };
+        Optional<u64> complete_length;
+    };
+    [[nodiscard]] Variant<ContentRangeValues, ExtractContentRangeFailure> extract_content_range_values() const;
+
     [[nodiscard]] Vector<ByteString> unique_names() const;
 
     template<typename Callback>
@@ -76,7 +83,7 @@ public:
             IterationDecision result;
 
             value.for_each_split_view(","sv, SplitBehavior::Nothing, [&](StringView header) -> IterationDecision {
-                result = callback(header.trim_whitespace());
+                result = callback(normalize_header_value(header));
                 return result;
             });
 

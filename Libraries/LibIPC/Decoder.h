@@ -10,20 +10,19 @@
 #include <AK/ByteString.h>
 #include <AK/Concepts.h>
 #include <AK/Forward.h>
-#include <AK/NumericLimits.h>
 #include <AK/Queue.h>
 #include <AK/StdLibExtras.h>
+#include <AK/Stream.h>
 #include <AK/String.h>
+#include <AK/Time.h>
 #include <AK/Try.h>
 #include <AK/TypeList.h>
 #include <AK/Variant.h>
 #include <LibCore/Forward.h>
-#include <LibCore/SharedCircularQueue.h>
-#include <LibCore/Socket.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/Concepts.h>
 #include <LibIPC/File.h>
 #include <LibIPC/Forward.h>
-#include <LibIPC/Message.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 
@@ -38,9 +37,9 @@ inline ErrorOr<T> decode(Decoder&)
 
 class Decoder {
 public:
-    Decoder(Stream& stream, Queue<File>& files)
+    Decoder(Stream& stream, Queue<Attachment>& attachments)
         : m_stream(stream)
-        , m_files(files)
+        , m_attachments(attachments)
     {
     }
 
@@ -63,11 +62,11 @@ public:
     ErrorOr<size_t> decode_size();
 
     Stream& stream() { return m_stream; }
-    Queue<File>& files() { return m_files; }
+    Queue<Attachment>& attachments() { return m_attachments; }
 
 private:
     Stream& m_stream;
-    Queue<File>& m_files;
+    Queue<Attachment>& m_attachments;
 };
 
 template<Arithmetic T>
@@ -83,6 +82,12 @@ ErrorOr<T> decode(Decoder& decoder)
 {
     auto value = TRY(decoder.decode<UnderlyingType<T>>());
     return static_cast<T>(value);
+}
+
+template<Concepts::DistinctNumeric T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    return T { TRY(decoder.decode<typename T::Type>()) };
 }
 
 template<>
@@ -125,13 +130,13 @@ template<>
 ErrorOr<File> decode(Decoder&);
 
 template<>
+ErrorOr<TransportHandle> decode(Decoder&);
+
+template<>
 ErrorOr<Empty> decode(Decoder&);
 
 template<>
 ErrorOr<Core::AnonymousBuffer> decode(Decoder&);
-
-template<>
-ErrorOr<Core::DateTime> decode(Decoder&);
 
 template<>
 ErrorOr<Core::ProxyData> decode(Decoder&);
@@ -199,13 +204,6 @@ ErrorOr<T> decode(Decoder& decoder)
     }
 
     return hashmap;
-}
-
-template<Concepts::SharedSingleProducerCircularQueue T>
-ErrorOr<T> decode(Decoder& decoder)
-{
-    auto anon_file = TRY(decoder.decode<IPC::File>());
-    return T::create(anon_file.take_fd());
 }
 
 template<Concepts::Optional T>

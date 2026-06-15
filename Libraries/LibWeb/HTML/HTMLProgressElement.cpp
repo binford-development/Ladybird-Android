@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLProgressElementPrototype.h>
+#include <LibWeb/Bindings/HTMLProgressElement.h>
+#include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
@@ -107,15 +108,16 @@ void HTMLProgressElement::create_shadow_tree_if_needed()
         return;
 
     auto shadow_root = realm().create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
+    shadow_root->set_user_agent_internal(true);
     set_shadow_root(shadow_root);
 
     auto progress_bar_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
-    progress_bar_element->set_use_pseudo_element(CSS::PseudoElement::SliderTrack);
     MUST(shadow_root->append_child(*progress_bar_element));
+    progress_bar_element->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::SliderTrack);
 
     m_progress_value_element = MUST(DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML));
-    m_progress_value_element->set_use_pseudo_element(CSS::PseudoElement::SliderFill);
     MUST(progress_bar_element->append_child(*m_progress_value_element));
+    m_progress_value_element->set_associated_shadow_host_pseudo_element(CSS::PseudoElement::SliderFill);
     update_progress_value_element();
 }
 

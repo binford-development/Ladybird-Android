@@ -10,7 +10,6 @@
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/Checked.h>
-#include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
 #include <AK/NumericLimits.h>
 #include <AK/String.h>
@@ -19,7 +18,7 @@
 #include <AK/Utf16View.h>
 #include <LibCore/AnonymousBuffer.h>
 #include <LibCore/Proxy.h>
-#include <LibCore/System.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/Encoder.h>
 #include <LibIPC/File.h>
 #include <LibURL/Origin.h>
@@ -149,7 +148,8 @@ ErrorOr<void> encode(Encoder& encoder, URL::Origin const& origin)
 {
     if (origin.is_opaque()) {
         TRY(encoder.encode(true));
-        TRY(encoder.encode(origin.nonce()));
+        TRY(encoder.encode(origin.opaque_data().nonce));
+        TRY(encoder.encode(origin.opaque_data().type));
     } else {
         TRY(encoder.encode(false));
         TRY(encoder.encode(origin.scheme()));
@@ -174,7 +174,7 @@ ErrorOr<void> encode(Encoder& encoder, File const& file)
     int fd = file.take_fd();
     VERIFY(fd >= 0);
 
-    TRY(encoder.append_file_descriptor(fd));
+    TRY(encoder.append_attachment(Attachment::from_fd(fd)));
     return {};
 }
 

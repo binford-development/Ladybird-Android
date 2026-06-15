@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021, the SerenityOS developers.
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022-2024, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2025, Lorenz Ackermann <me@lorenzackermann.xyz>
  *
@@ -10,10 +10,11 @@
 #include <AK/Debug.h>
 #include <AK/ScopeGuard.h>
 #include <LibTextCodec/Decoder.h>
-#include <LibWeb/Bindings/CSSImportRulePrototype.h>
+#include <LibWeb/Bindings/CSSImportRule.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSLayerBlockRule.h>
+#include <LibWeb/CSS/CSSScopeRule.h>
 #include <LibWeb/CSS/Fetch.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -28,16 +29,17 @@ namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(CSSImportRule);
 
-GC::Ref<CSSImportRule> CSSImportRule::create(JS::Realm& realm, URL url, GC::Ptr<DOM::Document> document, Optional<FlyString> layer, RefPtr<Supports> supports, GC::Ref<MediaList> media)
+GC::Ref<CSSImportRule> CSSImportRule::create(JS::Realm& realm, URL url, GC::Ptr<DOM::Document> document, Optional<FlyString> layer, Optional<ImportScope>&& scope, RefPtr<Supports> supports, GC::Ref<MediaList> media)
 {
-    return realm.create<CSSImportRule>(realm, move(url), document, move(layer), move(supports), move(media));
+    return realm.create<CSSImportRule>(realm, move(url), document, move(layer), move(scope), move(supports), move(media));
 }
 
-CSSImportRule::CSSImportRule(JS::Realm& realm, URL url, GC::Ptr<DOM::Document> document, Optional<FlyString> layer, RefPtr<Supports> supports, GC::Ref<MediaList> media)
+CSSImportRule::CSSImportRule(JS::Realm& realm, URL url, GC::Ptr<DOM::Document> document, Optional<FlyString> layer, Optional<ImportScope>&& scope, RefPtr<Supports> supports, GC::Ref<MediaList> media)
     : CSSRule(realm, Type::Import)
     , m_url(move(url))
     , m_document(document)
     , m_layer(move(layer))
+    , m_scope(move(scope))
     , m_supports(move(supports))
     , m_media(move(media))
 {
@@ -66,15 +68,20 @@ void CSSImportRule::visit_edges(Cell::Visitor& visitor)
 
 void CSSImportRule::set_parent_style_sheet(CSSStyleSheet* parent_style_sheet)
 {
+    if (m_parent_style_sheet)
+        m_parent_style_sheet->remove_critical_subresource(*this);
+
     Base::set_parent_style_sheet(parent_style_sheet);
+
+    if (m_parent_style_sheet)
+        m_parent_style_sheet->add_critical_subresource(*this);
 
     if (m_style_sheet && parent_style_sheet) {
         for (auto owning_document_or_shadow_root : parent_style_sheet->owning_documents_or_shadow_roots())
             m_style_sheet->add_owning_document_or_shadow_root(*owning_document_or_shadow_root);
     }
 
-    // Crude detection of whether we're already fetching.
-    if (m_style_sheet || m_document_load_event_delayer.has_value())
+    if (loading_state() != CSSStyleSheet::LoadingState::Unloaded)
         return;
 
     // Only try to fetch if we now have a parent
@@ -100,6 +107,26 @@ String CSSImportRule::serialized() const
             builder.append(" layer"sv);
         } else {
             builder.appendff(" layer({})", m_layer);
+        }
+    }
+
+    // AD-HOC: Serialize the rule's import scope if it exists.
+    if (m_scope.has_value()) {
+        builder.append(" scope"sv);
+        if (m_scope->start_selectors.has_value() || m_scope->end_selectors.has_value()) {
+            builder.append('(');
+            if (m_scope->start_selectors.has_value()) {
+                if (m_scope->end_selectors.has_value())
+                    builder.appendff("({})", serialize_a_group_of_selectors(*m_scope->start_selectors));
+                else
+                    builder.append(serialize_a_group_of_selectors(*m_scope->start_selectors));
+            }
+            if (m_scope->end_selectors.has_value()) {
+                if (m_scope->start_selectors.has_value())
+                    builder.append(' ');
+                builder.appendff("to ({})", serialize_a_group_of_selectors(*m_scope->end_selectors));
+            }
+            builder.append(')');
         }
     }
 
@@ -130,14 +157,13 @@ void CSSImportRule::fetch()
 
     // 2. If rule has a <supports-condition>, and that condition is not true, return.
     if (m_supports && !m_supports->matches()) {
+        set_loading_state(CSSStyleSheet::LoadingState::Loaded);
         return;
     }
 
-    // FIXME: Figure out the "correct" way to delay the load event.
-    m_document_load_event_delayer.emplace(*m_document);
-
     // AD-HOC: Track pending import rules to block rendering until they are done.
     m_document->add_pending_css_import_rule({}, *this);
+    set_loading_state(CSSStyleSheet::LoadingState::Loading);
 
     // 3. Fetch a style resource from rule’s URL, with ruleOrDeclaration rule, destination "style", CORS mode "no-cors", and
     //    processResponse being the following steps given response response and byte stream, null or failure byteStream:
@@ -145,20 +171,31 @@ void CSSImportRule::fetch()
         .environment_settings_object = HTML::relevant_settings_object(parent_style_sheet),
         .value = RuleOrDeclaration::Rule {
             .parent_style_sheet = &parent_style_sheet,
-        }
+        },
+        .style_resource_base_url = {},
+        .parent_style_sheet_origin_clean = {},
     };
     (void)fetch_a_style_resource(URL { href() }, rule_or_declaration, Fetch::Infrastructure::Request::Destination::Style, CorsMode::NoCors,
         [strong_this = GC::Ref { *this }, parent_style_sheet = GC::Ref { parent_style_sheet }, document = m_document](auto response, auto maybe_byte_stream) {
             // AD-HOC: Stop delaying the load event.
             ScopeGuard guard = [strong_this, document] {
                 document->remove_pending_css_import_rule({}, strong_this);
-                strong_this->m_document_load_event_delayer.clear();
+                if (strong_this->loading_state() != CSSStyleSheet::LoadingState::Error) {
+                    // If we have no critical subresources, or they're loaded already, we can report that immediately.
+                    auto sheet_loading_state = strong_this->m_style_sheet->loading_state();
+                    if (sheet_loading_state == CSSStyleSheet::LoadingState::Loaded || sheet_loading_state == CSSStyleSheet::LoadingState::Error) {
+                        strong_this->set_loading_state(sheet_loading_state);
+                    }
+                }
             };
 
             // 1. If byteStream is not a byte stream, return.
-            auto byte_stream = maybe_byte_stream.template get_pointer<ByteBuffer>();
-            if (!byte_stream)
+            auto byte_stream = maybe_byte_stream.template get_pointer<Core::ImmutableBytes>();
+            if (!byte_stream) {
+                // AD-HOC: This means the fetch failed, so we should report this as a load failure.
+                strong_this->set_loading_state(CSSStyleSheet::LoadingState::Error);
                 return;
+            }
 
             // FIXME: 2. If parentStylesheet is in quirks mode and response is CORS-same-origin, let content type be "text/css".
             //           Otherwise, let content type be the Content Type metadata of response.
@@ -184,7 +221,7 @@ void CSSImportRule::fetch()
             // The environment encoding of an imported style sheet is the encoding of the style sheet that imported it. [css-syntax-3]
             // FIXME: Save encoding on Stylesheet to get it here
             Optional<StringView> environment_encoding;
-            auto decoded_or_error = css_decode_bytes(environment_encoding, mime_type_charset, *byte_stream);
+            auto decoded_or_error = css_decode_bytes(environment_encoding, mime_type_charset, byte_stream->bytes());
             if (decoded_or_error.is_error()) {
                 dbgln_if(CSS_LOADER_DEBUG, "CSSImportRule: Failed to decode CSS file: {}", url);
                 return;
@@ -196,7 +233,7 @@ void CSSImportRule::fetch()
             imported_style_sheet->set_origin_clean(parent_style_sheet->is_origin_clean());
 
             // 6. If response is not CORS-same-origin, unset importedStylesheet’s origin-clean flag.
-            if (!response->is_cors_cross_origin())
+            if (!response->is_cors_same_origin())
                 imported_style_sheet->set_origin_clean(false);
 
             // 7. Set rule’s styleSheet to importedStylesheet.
@@ -213,6 +250,12 @@ void CSSImportRule::set_style_sheet(GC::Ref<CSSStyleSheet> style_sheet)
         for (auto owning_document_or_shadow_root : m_parent_style_sheet->owning_documents_or_shadow_roots())
             m_style_sheet->add_owning_document_or_shadow_root(*owning_document_or_shadow_root);
     }
+
+    auto document = m_style_sheet->owning_document();
+    if (!document && m_parent_style_sheet)
+        document = m_parent_style_sheet->owning_document();
+    if (document)
+        m_style_sheet->load_pending_image_resources(*document);
 
     m_style_sheet->invalidate_owners(DOM::StyleInvalidationReason::CSSImportRule);
 }
@@ -246,6 +289,40 @@ Optional<String> CSSImportRule::supports_text() const
     return m_supports->to_string();
 }
 
+Optional<SelectorList> const& CSSImportRule::scope_start_selectors() const
+{
+    VERIFY(m_scope.has_value());
+    return m_scope->start_selectors;
+}
+
+Optional<SelectorList> const& CSSImportRule::scope_end_selectors() const
+{
+    VERIFY(m_scope.has_value());
+    return m_scope->end_selectors;
+}
+
+Optional<SelectorList> const& CSSImportRule::scope_start_selectors_for_matching() const
+{
+    VERIFY(m_scope.has_value());
+    if (!m_scope->start_selectors.has_value())
+        return m_scope->start_selectors;
+
+    if (!m_cached_scope_start_selectors_for_matching.has_value())
+        m_cached_scope_start_selectors_for_matching = absolutize_selectors_relative_to(*m_scope->start_selectors, nullptr);
+    return m_cached_scope_start_selectors_for_matching;
+}
+
+Optional<SelectorList> const& CSSImportRule::scope_end_selectors_for_matching() const
+{
+    VERIFY(m_scope.has_value());
+    if (!m_scope->end_selectors.has_value())
+        return m_scope->end_selectors;
+
+    if (!m_cached_scope_end_selectors_for_matching.has_value())
+        m_cached_scope_end_selectors_for_matching = adapt_scope_end_selectors_for_matching(*m_scope->end_selectors);
+    return m_cached_scope_end_selectors_for_matching;
+}
+
 Optional<FlyString> CSSImportRule::internal_qualified_layer_name(Badge<StyleScope>) const
 {
     if (!m_layer.has_value())
@@ -264,6 +341,13 @@ bool CSSImportRule::matches() const
     return m_media->matches();
 }
 
+void CSSImportRule::clear_caches()
+{
+    Base::clear_caches();
+    m_cached_scope_start_selectors_for_matching.clear();
+    m_cached_scope_end_selectors_for_matching.clear();
+}
+
 void CSSImportRule::dump(StringBuilder& builder, int indent_levels) const
 {
     Base::dump(builder, indent_levels);
@@ -272,7 +356,7 @@ void CSSImportRule::dump(StringBuilder& builder, int indent_levels) const
     builder.appendff("Document URL: {}\n", url().to_string());
 
     dump_indent(builder, indent_levels + 1);
-    builder.appendff("Has document load delayer: {}\n", m_document_load_event_delayer.has_value());
+    builder.appendff("Loading state: {}\n", CSSStyleSheet::loading_state_name(loading_state()));
 
     if (m_layer.has_value()) {
         dump_indent(builder, indent_levels + 1);
@@ -284,6 +368,23 @@ void CSSImportRule::dump(StringBuilder& builder, int indent_levels) const
 
     if (m_supports)
         m_supports->dump(builder, indent_levels + 1);
+
+    if (m_scope.has_value()) {
+        dump_indent(builder, indent_levels + 1);
+        builder.append("Scope:\n"sv);
+
+        dump_indent(builder, indent_levels + 2);
+        if (m_scope->start_selectors.has_value())
+            builder.appendff("Start selectors: {}\n", serialize_a_group_of_selectors(*m_scope->start_selectors));
+        else
+            builder.append("Start selectors: <none>\n"sv);
+
+        dump_indent(builder, indent_levels + 2);
+        if (m_scope->end_selectors.has_value())
+            builder.appendff("End selectors: {}\n", serialize_a_group_of_selectors(*m_scope->end_selectors));
+        else
+            builder.append("End selectors: <none>\n"sv);
+    }
 
     if (m_style_sheet) {
         dump_sheet(builder, *m_style_sheet, indent_levels + 1);

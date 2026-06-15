@@ -20,10 +20,15 @@ enum class TableDimension {
 
 class TableFormattingContext final : public FormattingContext {
 public:
+    enum class RowMeasurement {
+        Include,
+        Skip,
+    };
+
     explicit TableFormattingContext(LayoutState&, LayoutMode, Box const&, FormattingContext* parent);
     ~TableFormattingContext();
 
-    void run_until_width_calculation(AvailableSpace const& available_space);
+    void run_until_width_calculation(AvailableSpace const& available_space, RowMeasurement = RowMeasurement::Include);
 
     virtual void run(AvailableSpace const&) override;
     virtual CSSPixels automatic_content_width() const override;
@@ -41,10 +46,10 @@ public:
     virtual void parent_context_did_dimension_child_root_box() override;
 
 private:
-    CSSPixels run_caption_layout(CSS::CaptionSide);
+    CSSPixels run_caption_layout(CSS::CaptionSide, AvailableSpace const&);
     CSSPixels compute_capmin();
     void compute_constrainedness();
-    void compute_cell_measures();
+    void compute_cell_measures(RowMeasurement);
     void compute_outer_content_sizes();
     template<class RowOrColumn>
     void initialize_table_measures();
@@ -56,6 +61,7 @@ private:
     void distribute_width_to_columns();
     void distribute_excess_width_to_columns(CSSPixels available_width);
     void distribute_excess_width_to_columns_fixed_mode(CSSPixels excess_width);
+    bool can_skip_row_intrinsic_measurement() const;
     void compute_table_height();
     void distribute_height_to_rows();
     void position_row_boxes();
@@ -77,6 +83,9 @@ private:
     bool distribute_excess_width_by_intrinsic_percentage(CSSPixels excess_width, ColumnFilter column_filter);
 
     bool use_fixed_mode_layout() const;
+
+    CSSPixels table_wrapper_containing_block_width() const;
+    CSSPixels table_wrapper_containing_block_height() const;
 
     CSSPixels m_table_height { 0 };
     CSSPixels m_automatic_content_height { 0 };
@@ -141,7 +150,7 @@ private:
     };
 
     struct ConflictingEdge {
-        GC::Ptr<Node const> element;
+        Node const* element { nullptr };
         Painting::PaintableBox::ConflictingElementKind element_kind;
         ConflictingSide side;
         Optional<size_t> row;
@@ -168,20 +177,20 @@ private:
         void collect_column_group_conflicting_edges(Vector<ConflictingEdge>&, Cell const&, ConflictingSide) const;
         void collect_table_box_conflicting_edges(Vector<ConflictingEdge>&, Cell const&, ConflictingSide) const;
 
-        GC::Ptr<Node const> get_col_element(size_t index) const
+        Node const* get_col_element(size_t index) const
         {
             if (index >= m_col_elements_by_index.size())
-                return {};
+                return nullptr;
             return m_col_elements_by_index[index];
         }
 
         struct RowGroupInfo {
-            GC::Ptr<Node const> row_group;
+            Node const* row_group { nullptr };
             size_t start_index;
             size_t row_count;
         };
 
-        Vector<GC::Ptr<Node const>> m_col_elements_by_index;
+        Vector<Node const*> m_col_elements_by_index;
         Vector<Optional<RowGroupInfo>> m_row_group_elements_by_index;
         TableFormattingContext const* m_context;
     };

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2023, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2026, Gregory Bertilso <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,23 +8,19 @@
 #pragma once
 
 #include <LibWeb/Forward.h>
-#include <LibWeb/Painting/MediaPaintable.h>
+#include <LibWeb/Painting/PaintableBox.h>
 
 namespace Web::Painting {
 
-class VideoPaintable final : public MediaPaintable {
-    GC_CELL(VideoPaintable, MediaPaintable);
-    GC_DECLARE_ALLOCATOR(VideoPaintable);
-
+class VideoPaintable final : public PaintableBox {
 public:
-    static GC::Ref<VideoPaintable> create(Layout::VideoBox const&);
+    static NonnullRefPtr<VideoPaintable> create(Layout::VideoBox const&);
+    virtual StringView class_name() const override { return "VideoPaintable"sv; }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
 
 private:
     VideoPaintable(Layout::VideoBox const&);
-
-    void paint_placeholder_video_controls(DisplayListRecordingContext&, DevicePixelRect video_rect, Optional<DevicePixelPoint> const& mouse_position) const;
 };
 
 }

@@ -5,11 +5,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <LibCore/Timer.h>
+#include <LibGC/Weak.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImmutableBitmap.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLImageElementPrototype.h>
+#include <LibWeb/Bindings/HTMLImageElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -22,7 +24,7 @@
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Response.h>
-#include <LibWeb/HTML/AnimatedBitmapDecodedImageData.h>
+#include <LibWeb/HTML/BitmapDecodedImageData.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
@@ -36,14 +38,110 @@
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
+#include <LibWeb/HTML/SupportedImageTypes.h>
 #include <LibWeb/Layout/ImageBox.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/ImageCodecPlugin.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 
 namespace Web::HTML {
+
+// We batch handling of successfully fetched images to avoid interleaving 1 image, 1 layout, 1 image, 1 layout, etc.
+// The processing timer is 1ms instead of 0ms, since layout is driven by a 0ms timer, and if we use 0ms here,
+// the event loop will process them in insertion order. This is a bit of a hack, but it works.
+struct BatchingDispatcher {
+public:
+    BatchingDispatcher()
+        : m_timer(Core::Timer::create_single_shot(1, [this] { process(); }))
+    {
+    }
+
+    void enqueue(GC::Root<GC::Function<void()>> callback)
+    {
+        // NOTE: We don't want to flush the queue on every image load, since that would be slow.
+        //       However, we don't want to keep growing the batch forever either.
+        static constexpr size_t max_loads_to_batch_before_flushing = 16;
+
+        m_queue.append(move(callback));
+        if (m_queue.size() < max_loads_to_batch_before_flushing)
+            m_timer->restart();
+    }
+
+private:
+    void process()
+    {
+        auto queue = move(m_queue);
+        for (auto& callback : queue)
+            callback->function()();
+    }
+
+    NonnullRefPtr<Core::Timer> m_timer;
+    Vector<GC::Root<GC::Function<void()>>> m_queue;
+};
+
+static BatchingDispatcher& batching_dispatcher()
+{
+    static NeverDestroyed<BatchingDispatcher> dispatcher;
+    return *dispatcher;
+}
+
+static bool image_element_dimensions_may_depend_on_intrinsic_size(Layout::ImageBox const& image_box)
+{
+    auto const& computed_values = image_box.computed_values();
+
+    auto size_is_definite = [](CSS::Size const& size) {
+        return size.is_length() || (size.is_calculated() && !size.contains_percentage());
+    };
+    auto size_constraint_is_definite_or_none = [&](CSS::Size const& size) {
+        return size.is_none() || size_is_definite(size);
+    };
+
+    auto const& width = computed_values.width();
+    auto const& height = computed_values.height();
+    if (!size_is_definite(width) || !size_is_definite(height))
+        return true;
+
+    auto const& min_width = computed_values.min_width();
+    auto const& min_height = computed_values.min_height();
+    if (!size_is_definite(min_width) || !size_is_definite(min_height))
+        return true;
+
+    auto const& max_width = computed_values.max_width();
+    auto const& max_height = computed_values.max_height();
+    if (!size_constraint_is_definite_or_none(max_width) || !size_constraint_is_definite_or_none(max_height))
+        return true;
+
+    return false;
+}
+
+static void reset_intrinsic_size_caches_after_image_data_change(Layout::ImageBox& image_box)
+{
+    image_box.reset_cached_intrinsic_sizes();
+    for (auto* ancestor = image_box.parent(); ancestor; ancestor = ancestor->parent()) {
+        auto* box = as_if<Layout::Box>(ancestor);
+        if (!box)
+            continue;
+        box->reset_cached_intrinsic_sizes();
+        if (box->is_absolutely_positioned() || box->is_svg_svg_box())
+            break;
+    }
+}
+
+static void set_needs_layout_update_or_repaint_after_image_data_change(HTMLImageElement& image_element, DOM::SetNeedsLayoutReason reason)
+{
+    auto layout_node = image_element.unsafe_layout_node();
+    auto* image_box = as_if<Layout::ImageBox>(layout_node);
+    if (!image_box || image_element_dimensions_may_depend_on_intrinsic_size(*image_box)) {
+        image_element.set_needs_layout_update(reason);
+        return;
+    }
+
+    reset_intrinsic_size_caches_after_image_data_change(*image_box);
+    image_element.set_needs_repaint();
+}
 
 GC_DEFINE_ALLOCATOR(HTMLImageElement);
 
@@ -70,6 +168,28 @@ void HTMLImageElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 
     m_current_request = ImageRequest::create(realm, document().page());
+
+    // AD-HOC: Create a DocumentObserver eagerly to handle document lifecycle changes.
+    //         The document_became_inactive callback handles the navigation case by clearing the
+    //         load event delayer and stopping the animation timer.
+    //         A document_became_active callback is set lazily by update_the_image_data() when
+    //         needed to restart image loading after the document becomes active again.
+    m_document_observer = realm.create<DOM::DocumentObserver>(realm, document());
+    m_document_observer->set_document_became_inactive([this]() {
+        m_load_event_delayer.clear();
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
+    });
+    m_document_observer->set_document_visibility_state_observer([this](HTML::VisibilityState visibility_state) {
+        if (visibility_state == HTML::VisibilityState::Hidden) {
+            m_animation_paused_by_visibility = m_animation_timer->is_active();
+            m_animation_timer->stop();
+            return;
+        }
+
+        if (m_animation_paused_by_visibility)
+            start_animation_timer_if_visible();
+    });
 }
 
 void HTMLImageElement::adopted_from(DOM::Document& old_document)
@@ -77,21 +197,40 @@ void HTMLImageElement::adopted_from(DOM::Document& old_document)
     old_document.unregister_viewport_client(*this);
     document().register_viewport_client(*this);
 
-    if (m_document_observer) {
-        m_document_observer->set_document(document());
-        if (!old_document.is_fully_active() && document().is_fully_active())
-            m_document_observer->document_became_active()->function()();
+    m_document_observer->set_document(document());
+    if (!old_document.is_fully_active() && document().is_fully_active()) {
+        if (auto callback = m_document_observer->document_became_active())
+            callback->function()();
     }
+
+    if (m_load_event_delayer.has_value())
+        m_load_event_delayer.emplace(document());
 }
 
 void HTMLImageElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     visitor.visit(m_current_request);
     visitor.visit(m_pending_request);
     visitor.visit(m_document_observer);
+    visitor.visit(m_dimension_attribute_source);
     visit_lazy_loading_element(visitor);
+}
+
+// https://html.spec.whatwg.org/multipage/embedded-content.html#concept-img-dimension-attribute-source
+DOM::Element const& HTMLImageElement::dimension_attribute_source() const
+{
+    if (m_dimension_attribute_source)
+        return *m_dimension_attribute_source;
+    return *this;
+}
+
+void HTMLImageElement::set_dimension_attribute_source(DOM::Element const* source)
+{
+    if (m_dimension_attribute_source.ptr() != source) {
+        m_dimension_attribute_source = source;
+        set_needs_style_update(true);
+    }
 }
 
 bool HTMLImageElement::is_presentational_hint(FlyString const& name) const
@@ -105,32 +244,33 @@ bool HTMLImageElement::is_presentational_hint(FlyString const& name) const
         HTML::AttributeNames::border);
 }
 
-void HTMLImageElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLImageElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
+    Base::apply_presentational_hints(properties);
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::hspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginLeft, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginRight, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginLeft, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginRight, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::vspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginTop, *parsed_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::MarginBottom, *parsed_value);
+                properties.append({ .property_id = CSS::PropertyID::MarginTop, .value = *parsed_value });
+                properties.append({ .property_id = CSS::PropertyID::MarginBottom, .value = *parsed_value });
             }
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
                 auto width_value = CSS::LengthStyleValue::create(CSS::Length::make_px(*parsed_value));
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopWidth, width_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightWidth, width_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomWidth, width_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftWidth, width_value);
+                properties.append({ .property_id = CSS::PropertyID::BorderTopWidth, .value = width_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderRightWidth, .value = width_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderBottomWidth, .value = width_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderLeftWidth, .value = width_value });
 
                 auto solid_value = CSS::KeywordStyleValue::create(CSS::Keyword::Solid);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopStyle, solid_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightStyle, solid_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomStyle, solid_value);
-                cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftStyle, solid_value);
+                properties.append({ .property_id = CSS::PropertyID::BorderTopStyle, .value = solid_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderRightStyle, .value = solid_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderBottomStyle, .value = solid_value });
+                properties.append({ .property_id = CSS::PropertyID::BorderLeftStyle, .value = solid_value });
             }
         }
     });
@@ -147,19 +287,20 @@ void HTMLImageElement::form_associated_element_attribute_changed(FlyString const
     }
 
     if (name == HTML::AttributeNames::alt) {
-        if (layout_node())
-            did_update_alt_text(as<Layout::ImageBox>(*layout_node()));
+        // NB: Called from attribute change handler, layout may be stale.
+        if (unsafe_layout_node())
+            did_update_alt_text(as<Layout::ImageBox>(*unsafe_layout_node()));
     }
 
     if (name == HTML::AttributeNames::decoding) {
-        if (value.has_value() && (value->equals_ignoring_ascii_case("sync"sv) || value->equals_ignoring_ascii_case("async"sv)))
-            dbgln("FIXME: HTMLImageElement.decoding = '{}' is not implemented yet", value->to_ascii_lowercase());
+        if (value.has_value() && value->equals_ignoring_ascii_case("sync"sv))
+            dbgln("FIXME: HTMLImageElement.decoding = 'sync' is not implemented yet");
     }
 }
 
-GC::Ptr<Layout::Node> HTMLImageElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLImageElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::ImageBox>(document(), *this, move(style), *this);
+    return make_ref_counted<Layout::ImageBox>(document(), *this, style, *this);
 }
 
 void HTMLImageElement::adjust_computed_style(CSS::ComputedProperties& style)
@@ -169,16 +310,11 @@ void HTMLImageElement::adjust_computed_style(CSS::ComputedProperties& style)
         style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::None)));
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::immutable_bitmap() const
-{
-    return current_image_bitmap();
-}
-
-RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::default_image_bitmap_sized(Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> HTMLImageElement::default_image_frame_sized(Gfx::IntSize size) const
 {
     if (auto data = m_current_request->image_data())
-        return data->bitmap(0, size);
-    return nullptr;
+        return data->frame(0, size);
+    return {};
 }
 
 bool HTMLImageElement::is_image_available() const
@@ -207,11 +343,11 @@ Optional<CSSPixelFraction> HTMLImageElement::intrinsic_aspect_ratio() const
     return {};
 }
 
-RefPtr<Gfx::ImmutableBitmap> HTMLImageElement::current_image_bitmap_sized(Gfx::IntSize size) const
+Optional<Gfx::DecodedImageFrame> HTMLImageElement::current_image_frame_sized(Gfx::IntSize size) const
 {
     if (auto data = m_current_request->image_data())
-        return data->bitmap(m_current_frame_index, size);
-    return nullptr;
+        return data->frame(m_current_frame_index, size);
+    return {};
 }
 
 void HTMLImageElement::set_visible_in_viewport(bool)
@@ -222,10 +358,10 @@ void HTMLImageElement::set_visible_in_viewport(bool)
 // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-width
 WebIDL::UnsignedLong HTMLImageElement::width() const
 {
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLImageElementWidth);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLImageElementWidth);
 
     // Return the rendered width of the image, in CSS pixels, if the image is being rendered.
-    if (auto* paintable_box = this->paintable_box())
+    if (auto paintable_box = this->paintable_box())
         return paintable_box->content_width().to_int();
 
     // On setting [the width or height IDL attribute], they must act as if they reflected the respective content attributes of the same name.
@@ -236,7 +372,7 @@ WebIDL::UnsignedLong HTMLImageElement::width() const
 
     // ...or else the density-corrected intrinsic width and height of the image, in CSS pixels,
     // if the image has intrinsic dimensions and is available but not being rendered.
-    if (auto bitmap = current_image_bitmap())
+    if (auto bitmap = current_image_frame(); bitmap.has_value())
         return bitmap->width();
 
     // ...or else 0, if the image is not available or does not have intrinsic dimensions.
@@ -253,10 +389,10 @@ void HTMLImageElement::set_width(WebIDL::UnsignedLong width)
 // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-height
 WebIDL::UnsignedLong HTMLImageElement::height() const
 {
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLImageElementHeight);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLImageElementHeight);
 
     // Return the rendered height of the image, in CSS pixels, if the image is being rendered.
-    if (auto* paintable_box = this->paintable_box())
+    if (auto paintable_box = this->paintable_box())
         return paintable_box->content_height().to_int();
 
     // On setting [the width or height IDL attribute], they must act as if they reflected the respective content attributes of the same name.
@@ -267,7 +403,7 @@ WebIDL::UnsignedLong HTMLImageElement::height() const
 
     // ...or else the density-corrected intrinsic height and height of the image, in CSS pixels,
     // if the image has intrinsic dimensions and is available but not being rendered.
-    if (auto bitmap = current_image_bitmap())
+    if (auto bitmap = current_image_frame(); bitmap.has_value())
         return bitmap->height();
 
     // ...or else 0, if the image is not available or does not have intrinsic dimensions.
@@ -284,25 +420,27 @@ void HTMLImageElement::set_height(WebIDL::UnsignedLong height)
 // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-naturalwidth
 unsigned HTMLImageElement::natural_width() const
 {
-    // Return the density-corrected intrinsic width of the image, in CSS pixels,
-    // if the image has intrinsic dimensions and is available.
-    if (auto bitmap = current_image_bitmap())
-        return bitmap->width();
+    // 1. If the image is not available, then return 0.
+    auto bitmap = current_image_frame();
+    if (!bitmap.has_value())
+        return 0;
 
-    // ...or else 0.
-    return 0;
+    // 2. Return the respective component of the image's density-corrected natural width and height, in CSS pixels. [CSS]
+    // FIXME: Implement density-corrected algorithm.
+    return bitmap->width();
 }
 
 // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-naturalheight
 unsigned HTMLImageElement::natural_height() const
 {
-    // Return the density-corrected intrinsic height of the image, in CSS pixels,
-    // if the image has intrinsic dimensions and is available.
-    if (auto bitmap = current_image_bitmap())
-        return bitmap->height();
+    // 1. If the image is not available, then return 0.
+    auto bitmap = current_image_frame();
+    if (!bitmap.has_value())
+        return 0;
 
-    // ...or else 0.
-    return 0;
+    // 2. Return the respective component of the image's density-corrected natural width and height, in CSS pixels. [CSS]
+    // FIXME: Implement density-corrected algorithm.
+    return bitmap->height();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-htmlimageelement-x
@@ -311,15 +449,15 @@ int HTMLImageElement::x() const
     // The x attribute, on getting, must return the scaled x-coordinate of the left border edge of the first box
     // associated with the element, relative to the initial containing block origin, ignoring any transforms that apply
     // to the element and its ancestors, or zero if there is no box.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLImageElementX);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLImageElementX);
 
-    auto const* paintable_box = this->paintable_box();
+    auto paintable_box = this->paintable_box();
     if (!paintable_box)
         return 0;
 
     CSSPixels scroll_offset_x = 0;
-    if (auto enclosing_scroll = paintable_box->enclosing_scroll_frame(); enclosing_scroll)
-        scroll_offset_x = enclosing_scroll->cumulative_offset().x();
+    if (auto idx = paintable_box->enclosing_scroll_frame_index(); idx.value())
+        scroll_offset_x = paintable_box->document().paintable()->scroll_state().cumulative_offset(idx).x();
 
     return (paintable_box->absolute_border_box_rect().x() - scroll_offset_x).to_int();
 }
@@ -330,15 +468,15 @@ int HTMLImageElement::y() const
     // The y attribute, on getting, must return the scaled y-coordinate of the top border edge of the first box
     // associated with the element, relative to the initial containing block origin, ignoring any transforms that apply
     // to the element and its ancestors, or zero if there is no box.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLImageElementY);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLImageElementY);
 
-    auto const* paintable_box = this->paintable_box();
+    auto paintable_box = this->paintable_box();
     if (!paintable_box)
         return 0;
 
     CSSPixels scroll_offset_y = 0;
-    if (auto enclosing_scroll = paintable_box->enclosing_scroll_frame(); enclosing_scroll)
-        scroll_offset_y = enclosing_scroll->cumulative_offset().y();
+    if (auto idx = paintable_box->enclosing_scroll_frame_index(); idx.value())
+        scroll_offset_y = paintable_box->document().paintable()->scroll_state().cumulative_offset(idx).y();
 
     return (paintable_box->absolute_border_box_rect().y() - scroll_offset_y).to_int();
 }
@@ -387,85 +525,101 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
         // 1. Let global be this's relevant global object.
         auto& global = relevant_global_object(*this);
 
-        auto reject_if_document_not_fully_active = [this, promise, &realm]() -> bool {
-            if (this->document().is_fully_active())
-                return false;
-
-            auto exception = WebIDL::EncodingError::create(realm, "Node document not fully active"_utf16);
+        auto reject_promise = [promise, &realm](Utf16String const& message) {
+            auto exception = WebIDL::EncodingError::create(realm, message);
             HTML::TemporaryExecutionContext context(realm);
             WebIDL::reject_promise(realm, promise, exception);
-            return true;
         };
 
-        auto reject_if_current_request_state_broken = [this, promise, &realm]() {
-            if (this->current_request().state() != ImageRequest::State::Broken)
-                return false;
+        auto queue_reject_task = [reject_promise, &global, &realm](Utf16String const& message) {
+            queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [reject_promise, message = message] {
+                reject_promise(message);
+            }));
+        };
 
-            auto exception = WebIDL::EncodingError::create(realm, "Current request state is broken"_utf16);
-            HTML::TemporaryExecutionContext context(realm);
-            WebIDL::reject_promise(realm, promise, exception);
-            return true;
+        auto queue_resolve_task = [promise, &realm, &global] {
+            queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [&realm, promise] {
+                HTML::TemporaryExecutionContext context(realm);
+                WebIDL::resolve_promise(realm, promise, JS::js_undefined());
+            }));
         };
 
         // 2. If any of the following are true:
         //    - this's node document is not fully active;
-        //    - or this's current request's state is broken,
-        //    then reject promise with an "EncodingError" DOMException.
-        if (reject_if_document_not_fully_active() || reject_if_current_request_state_broken()) {
+        if (!document().is_fully_active()) {
+            // then reject promise with an "EncodingError" DOMException.
+            reject_promise("Node document not fully active"_utf16);
             return;
         }
 
+        //    - or this's current request's state is broken,
+        auto& current_request = *m_current_request;
+        if (current_request.state() == ImageRequest::State::Broken) {
+            // then reject promise with an "EncodingError" DOMException.
+            reject_promise("Current request state is broken"_utf16);
+            return;
+        }
+
+        auto expected_request = m_current_request;
+        auto weak_this = GC::Weak<HTMLImageElement> { *this };
+
         // 3. Otherwise, in parallel wait for one of the following cases to occur, and perform the corresponding actions:
-        Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(heap(), [this, promise, &realm, &global] {
-            Platform::EventLoopPlugin::the().spin_until(GC::create_function(heap(), [this, promise, &realm, &global] {
-                auto queue_reject_task = [promise, &realm, &global](Utf16String message) {
-                    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [&realm, promise, message = move(message)] {
-                        auto exception = WebIDL::EncodingError::create(realm, message);
-                        HTML::TemporaryExecutionContext context(realm);
-                        WebIDL::reject_promise(realm, promise, exception);
-                    }));
-                };
+        if (current_request.state() == ImageRequest::State::CompletelyAvailable) {
+            queue_resolve_task();
+            return;
+        }
 
-                // -> This img element's node document stops being fully active
-                if (!document().is_fully_active()) {
-                    // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
+        if (!current_request.shared_resource_request()) {
+            queue_reject_task("Current request changed or was mutated"_utf16);
+            return;
+        }
+
+        current_request.add_callbacks(
+            // AD-HOC: Enqueue on the batching dispatcher to preserve ordering relative to update_the_image_data's step
+            //         16, which also goes through the batching dispatcher. Otherwise decode() can resolve before the
+            //         current request transitions to CompletelyAvailable, leaving the image dimensions at zero when
+            //         callers inspect them.
+            [weak_this, expected_request, queue_resolve_task, queue_reject_task, &realm] {
+                batching_dispatcher().enqueue(GC::create_function(realm.heap(), [weak_this, expected_request, queue_resolve_task, queue_reject_task] {
+                    if (!weak_this) {
+                        queue_reject_task("Image element no longer available"_utf16);
+                        return;
+                    }
+                    auto& image = *weak_this;
+
+                    if (!image.document().is_fully_active()) {
+                        queue_reject_task("Node document not fully active"_utf16);
+                        return;
+                    }
+                    if (image.m_current_request != expected_request) {
+                        queue_reject_task("Current request changed or was mutated"_utf16);
+                        return;
+                    }
+                    if (image.current_request().state() == ImageRequest::State::Broken) {
+                        queue_reject_task("Current request state is broken"_utf16);
+                        return;
+                    }
+                    queue_resolve_task();
+                }));
+            },
+            [weak_this, expected_request, queue_reject_task] {
+                if (!weak_this) {
+                    queue_reject_task("Image element no longer available"_utf16);
+                    return;
+                }
+                auto& image = *weak_this;
+
+                if (!image.document().is_fully_active()) {
                     queue_reject_task("Node document not fully active"_utf16);
-                    return true;
+                    return;
                 }
 
-                auto state = this->current_request().state();
-
-                // -> FIXME: This img element's current request changes or is mutated
-                if (false) {
-                    // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
+                if (image.m_current_request != expected_request) {
                     queue_reject_task("Current request changed or was mutated"_utf16);
-                    return true;
+                    return;
                 }
-
-                // -> This img element's current request's state becomes broken
-                if (state == ImageRequest::State::Broken) {
-                    // Queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
-                    queue_reject_task("Current request state is broken"_utf16);
-                    return true;
-                }
-
-                // -> This img element's current request's state becomes completely available
-                if (state == ImageRequest::State::CompletelyAvailable) {
-                    // FIXME: Decode the image.
-                    // FIXME: If decoding does not need to be performed for this image (for example because it is a vector graphic) or the decoding process completes successfully, then queue a global task on the DOM manipulation task source with global to resolve promise with undefined.
-                    // FIXME: If decoding fails (for example due to invalid image data), then queue a global task on the DOM manipulation task source with global to reject promise with an "EncodingError" DOMException.
-
-                    // NOTE: For now we just resolve it.
-                    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [&realm, promise] {
-                        HTML::TemporaryExecutionContext context(realm);
-                        WebIDL::resolve_promise(realm, promise, JS::js_undefined());
-                    }));
-                    return true;
-                }
-
-                return false;
-            }));
-        }));
+                queue_reject_task("Current request state is broken"_utf16);
+            });
     }));
 
     // 3. Return promise.
@@ -495,49 +649,9 @@ bool HTMLImageElement::uses_srcset_or_picture() const
     return has_attribute(HTML::AttributeNames::srcset) || (parent() && is<HTMLPictureElement>(*parent()));
 }
 
-// We batch handling of successfully fetched images to avoid interleaving 1 image, 1 layout, 1 image, 1 layout, etc.
-// The processing timer is 1ms instead of 0ms, since layout is driven by a 0ms timer, and if we use 0ms here,
-// the event loop will process them in insertion order. This is a bit of a hack, but it works.
-struct BatchingDispatcher {
-public:
-    BatchingDispatcher()
-        : m_timer(Core::Timer::create_single_shot(1, [this] { process(); }))
-    {
-    }
-
-    void enqueue(GC::Root<GC::Function<void()>> callback)
-    {
-        // NOTE: We don't want to flush the queue on every image load, since that would be slow.
-        //       However, we don't want to keep growing the batch forever either.
-        static constexpr size_t max_loads_to_batch_before_flushing = 16;
-
-        m_queue.append(move(callback));
-        if (m_queue.size() < max_loads_to_batch_before_flushing)
-            m_timer->restart();
-    }
-
-private:
-    void process()
-    {
-        auto queue = move(m_queue);
-        for (auto& callback : queue)
-            callback->function()();
-    }
-
-    NonnullRefPtr<Core::Timer> m_timer;
-    Vector<GC::Root<GC::Function<void()>>> m_queue;
-};
-
-static BatchingDispatcher& batching_dispatcher()
-{
-    static BatchingDispatcher dispatcher;
-    return dispatcher;
-}
-
 // https://html.spec.whatwg.org/multipage/images.html#update-the-image-data
 void HTMLImageElement::update_the_image_data(bool restart_animations, bool maybe_omit_events)
 {
-    auto& realm = this->realm();
     auto update_the_image_data_count = ++m_update_the_image_data_count;
 
     // 1. If the element's node document is not fully active, then:
@@ -546,12 +660,8 @@ void HTMLImageElement::update_the_image_data(bool restart_animations, bool maybe
         // 2. Wait until the element's node document is fully active.
         // 3. If another instance of this algorithm for this img element was started after this instance
         //    (even if it aborted and is no longer running), then return.
-        if (m_document_observer)
-            return;
-
-        m_document_observer = realm.create<DOM::DocumentObserver>(realm, document());
+        // 4. Queue a microtask to continue this algorithm.
         m_document_observer->set_document_became_active([this, restart_animations, maybe_omit_events, update_the_image_data_count]() {
-            // 4. Queue a microtask to continue this algorithm.
             queue_a_microtask(&document(), GC::create_function(this->heap(), [this, restart_animations, maybe_omit_events, update_the_image_data_count]() {
                 update_the_image_data_impl(restart_animations, maybe_omit_events, update_the_image_data_count);
             }));
@@ -629,9 +739,10 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
             m_pending_request = nullptr;
 
             // 4. Set the current request to a new image request whose image data is that of the entry and whose state is completely available.
-            m_current_request = ImageRequest::create(realm(), document().page());
+            m_current_request = ImageRequest::create(document().realm(), document().page());
             m_current_request->set_image_data(entry->image_data);
             m_current_request->set_state(ImageRequest::State::CompletelyAvailable);
+            m_current_frame_index = 0;
 
             // 5. Prepare the current request for presentation given the img element.
             m_current_request->prepare_for_presentation(*this);
@@ -643,12 +754,22 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
 
             // 7. Queue an element task on the DOM manipulation task source given the img element and following steps:
             queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, restart_animations, maybe_omit_events, url_string, previous_url] {
+                // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+                //         between when this task was queued and when it runs.
+                if (!document().is_fully_active()) {
+                    m_load_event_delayer.clear();
+                    return;
+                }
+
                 // 1. If restart animation is set, then restart the animation.
                 if (restart_animations)
                     restart_the_animation();
 
                 // 2. Set the current request's current URL to urlString.
-                m_current_request->set_current_url(realm(), *url_string);
+                m_current_request->set_current_url(document().realm(), *url_string);
+
+                set_needs_style_update(true);
+                set_needs_layout_update_or_repaint_after_image_data_change(*this, DOM::SetNeedsLayoutReason::HTMLImageElementUpdateTheImageData);
 
                 // 3. If maybe omit events is not set or previousURL is not equal to urlString, then fire an event named load at the img element.
                 if (!maybe_omit_events || previous_url != url_string)
@@ -666,6 +787,13 @@ after_step_7:
         //    (even if it aborted and is no longer running), then return.
         if (update_the_image_data_count != m_update_the_image_data_count)
             return;
+
+        // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+        //         between when this microtask was queued and when it runs.
+        if (!document().is_fully_active()) {
+            m_load_event_delayer.clear();
+            return;
+        }
 
         // 10. Let selected source and selected pixel density be
         //    the URL and pixel density that results from selecting an image source, respectively.
@@ -688,8 +816,15 @@ after_step_7:
 
             // 2. Queue an element task on the DOM manipulation task source given the img element and the following steps:
             queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, maybe_omit_events, previous_url] {
+                // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+                //         between when this task was queued and when it runs.
+                if (!document().is_fully_active()) {
+                    m_load_event_delayer.clear();
+                    return;
+                }
+
                 // 1. Change the current request's current URL to the empty string.
-                m_current_request->set_current_url(realm(), String {});
+                m_current_request->set_current_url(document().realm(), String {});
 
                 // 2. If all of the following conditions are true:
                 //    - the element has a src attribute or it uses srcset or picture; and
@@ -722,8 +857,15 @@ after_step_7:
 
             // 4. Queue an element task on the DOM manipulation task source given the img element and the following steps:
             queue_an_element_task(HTML::Task::Source::DOMManipulation, [this, selected_source, maybe_omit_events, previous_url] {
+                // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+                //         between when this task was queued and when it runs.
+                if (!document().is_fully_active()) {
+                    m_load_event_delayer.clear();
+                    return;
+                }
+
                 // 1. Change the current request's current URL to selected source.
-                m_current_request->set_current_url(realm(), selected_source.value().url);
+                m_current_request->set_current_url(document().realm(), selected_source.value().url);
 
                 // 2. If maybe omit events is not set or previousURL is not equal to selected source, then fire an event named error at the img element.
                 if (!maybe_omit_events || previous_url != selected_source.value().url)
@@ -738,17 +880,21 @@ after_step_7:
         if (m_pending_request && url_string == m_pending_request->current_url())
             return;
 
-        // 15. If urlString is the same as the current request's current URL and the current request's state is partially available,
-        //     then abort the image request for the pending request,
-        //     queue an element task on the DOM manipulation task source given the img element
-        //     to restart the animation if restart animation is set, and return.
+        // 15. If urlString is the same as the current request's current URL and the current request's state is
+        //     partially available:
         if (url_string == m_current_request->current_url() && m_current_request->state() == ImageRequest::State::PartiallyAvailable) {
+            // 1. Abort the image request for the pending request.
             abort_the_image_request(realm(), m_pending_request);
+
+            // 2. If restart animation is set, then queue an element task on the DOM manipulation task source given the
+            //    img element to restart the animation.
             if (restart_animations) {
                 queue_an_element_task(HTML::Task::Source::DOMManipulation, [this] {
                     restart_the_animation();
                 });
             }
+
+            // 3. Return.
             return;
         }
 
@@ -759,8 +905,8 @@ after_step_7:
         //         multiple image elements (as well as CSS background-images, etc.)
 
         // 17. Set image request to a new image request whose current URL is urlString.
-        auto image_request = ImageRequest::create(realm(), document().page());
-        image_request->set_current_url(realm(), *url_string);
+        auto image_request = ImageRequest::create(document().realm(), document().page());
+        image_request->set_current_url(document().realm(), *url_string);
 
         // 18. If the current request's state is unavailable or broken, then set the current request to image request.
         //     Otherwise, set the pending request to image request.
@@ -777,7 +923,7 @@ after_step_7:
         if (delay_load_event)
             m_load_event_delayer.emplace(document());
 
-        add_callbacks_to_image_request(*image_request, maybe_omit_events, *url_string, previous_url);
+        add_callbacks_to_image_request(*image_request, maybe_omit_events, *url_string, previous_url, update_the_image_data_count);
 
         // AD-HOC: If the image request is already available or fetching, no need to start another fetch.
         if (image_request->is_available() || image_request->is_fetching())
@@ -808,7 +954,7 @@ after_step_7:
         if (will_lazy_load_element()) {
             // 1. Set the img's lazy load resumption steps to the rest of this algorithm starting with the step labeled fetch the image.
             set_lazy_load_resumption_steps([this, request, image_request]() {
-                image_request->fetch_image(realm(), request);
+                image_request->fetch_image(document().realm(), request);
             });
 
             // 2. Start intersection-observing a lazy loading element for the img element.
@@ -818,15 +964,29 @@ after_step_7:
             return;
         }
 
-        image_request->fetch_image(realm(), request);
+        image_request->fetch_image(document().realm(), request);
     }));
 }
 
-void HTMLImageElement::add_callbacks_to_image_request(GC::Ref<ImageRequest> image_request, bool maybe_omit_events, String const& url_string, String const& previous_url)
+void HTMLImageElement::add_callbacks_to_image_request(GC::Ref<ImageRequest> image_request, bool maybe_omit_events, String const& url_string, String const& previous_url, u64 update_the_image_data_count)
 {
     image_request->add_callbacks(
-        [this, image_request, maybe_omit_events, url_string, previous_url]() {
-            batching_dispatcher().enqueue(GC::create_function(realm().heap(), [this, image_request, maybe_omit_events, url_string, previous_url] {
+        [this, image_request, maybe_omit_events, url_string, previous_url, update_the_image_data_count]() {
+            batching_dispatcher().enqueue(GC::create_function(realm().heap(), [this, image_request, maybe_omit_events, url_string, previous_url, update_the_image_data_count] {
+                // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+                //         between when the fetch completed and when this batched callback runs.
+                if (!document().is_fully_active()) {
+                    m_load_event_delayer.clear();
+                    return;
+                }
+
+                // AD-HOC: If another instance of update_the_image_data was started after the one that initiated this
+                //         request, this callback is stale. Bail out to avoid corrupting the state of the newer request.
+                if (update_the_image_data_count != m_update_the_image_data_count) {
+                    m_load_event_delayer.clear();
+                    return;
+                }
+
                 VERIFY(image_request->shared_resource_request());
                 auto image_data = image_request->shared_resource_request()->image_data();
                 image_request->set_image_data(image_data);
@@ -850,26 +1010,41 @@ void HTMLImageElement::add_callbacks_to_image_request(GC::Ref<ImageRequest> imag
 
                 // 3. Add the image to the list of available images using the key key, with the ignore higher-layer caching flag set.
                 document().list_of_available_images().add(key, *image_data, true);
+                document().prune_image_resource_caches();
 
                 set_needs_style_update(true);
-                if (auto layout_node = this->layout_node())
-                    layout_node->set_needs_layout_update(DOM::SetNeedsLayoutReason::HTMLImageElementUpdateTheImageData);
+                set_needs_layout_update_or_repaint_after_image_data_change(*this, DOM::SetNeedsLayoutReason::HTMLImageElementUpdateTheImageData);
 
                 // 4. If maybe omit events is not set or previousURL is not equal to urlString, then fire an event named load at the img element.
                 if (!maybe_omit_events || previous_url != url_string)
                     dispatch_event(DOM::Event::create(realm(), HTML::EventNames::load));
 
+                m_current_frame_index = 0;
+                m_animation_timer->stop();
                 if (image_data->is_animated() && image_data->frame_count() > 1) {
-                    m_current_frame_index = 0;
                     m_animation_timer->set_interval(image_data->frame_duration(0));
-                    m_animation_timer->start();
+                    start_animation_timer_if_visible();
                 }
 
                 m_load_event_delayer.clear();
             }));
         },
-        [this, image_request, maybe_omit_events, url_string, previous_url]() {
+        [this, image_request, maybe_omit_events, url_string, previous_url, update_the_image_data_count]() {
+            // AD-HOC: Bail out if the document became inactive (e.g. iframe removed or navigated)
+            //         between when the fetch completed and when this failure callback runs.
+            if (!document().is_fully_active()) {
+                m_load_event_delayer.clear();
+                return;
+            }
+
             // The image data is not in a supported file format;
+
+            // AD-HOC: If another instance of update_the_image_data was started after the one that initiated this
+            //         request, this callback is stale. Bail out to avoid corrupting the state of the newer request.
+            if (update_the_image_data_count != m_update_the_image_data_count) {
+                m_load_event_delayer.clear();
+                return;
+            }
 
             // the user agent must set image request's state to broken,
             image_request->set_state(ImageRequest::State::Broken);
@@ -960,8 +1135,8 @@ void HTMLImageElement::react_to_changes_in_the_environment()
         key.origin = document().origin();
 
     // 12. ⌛ Let image request be a new image request whose current URL is urlString
-    auto image_request = ImageRequest::create(realm(), document().page());
-    image_request->set_current_url(realm(), *url_string);
+    auto image_request = ImageRequest::create(document().realm(), document().page());
+    image_request->set_current_url(document().realm(), *url_string);
 
     // 13. ⌛ Set the element's pending request to image request.
     m_pending_request = image_request;
@@ -986,6 +1161,7 @@ void HTMLImageElement::react_to_changes_in_the_environment()
 
             // 4. Add the image to the list of available images using the key key, with the ignore higher-layer caching flag set.
             document().list_of_available_images().add(key, image_data, true);
+            document().prune_image_resource_caches();
 
             // 5. Upgrade the pending request to the current request.
             upgrade_pending_request_to_current_request();
@@ -994,8 +1170,7 @@ void HTMLImageElement::react_to_changes_in_the_environment()
             image_request->prepare_for_presentation(*this);
             // FIXME: This is ad-hoc, updating the layout here should probably be handled by prepare_for_presentation().
             set_needs_style_update(true);
-            if (auto layout_node = this->layout_node())
-                layout_node->set_needs_layout_update(DOM::SetNeedsLayoutReason::HTMLImageElementReactToChangesInTheEnvironment);
+            set_needs_layout_update_or_repaint_after_image_data_change(*this, DOM::SetNeedsLayoutReason::HTMLImageElementReactToChangesInTheEnvironment);
 
             // 7. Fire an event named load at the img element.
             dispatch_event(DOM::Event::create(realm(), HTML::EventNames::load));
@@ -1061,7 +1236,7 @@ void HTMLImageElement::react_to_changes_in_the_environment()
             });
 
         // 5. Let response be the result of fetching request.
-        image_request->fetch_image(realm(), request);
+        image_request->fetch_image(document().realm(), request);
     }
 }
 
@@ -1087,39 +1262,36 @@ void HTMLImageElement::restart_the_animation()
 {
     m_current_frame_index = 0;
 
-    auto image_data = m_current_request->image_data();
-    if (image_data && image_data->frame_count() > 1) {
-        m_animation_timer->start();
+    if (current_request_has_running_animation()) {
+        start_animation_timer_if_visible();
     } else {
         m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
     }
 }
 
-static bool is_supported_image_type(String const& type)
+bool HTMLImageElement::current_request_has_running_animation() const
 {
-    if (type.is_empty())
-        return true;
-    if (!type.starts_with_bytes("image/"sv, CaseSensitivity::CaseInsensitive))
-        return false;
-    // FIXME: These should be derived from ImageDecoder
-    if (type.equals_ignoring_ascii_case("image/bmp"sv)
-        || type.equals_ignoring_ascii_case("image/gif"sv)
-        || type.equals_ignoring_ascii_case("image/vnd.microsoft.icon"sv)
-        || type.equals_ignoring_ascii_case("image/x-icon"sv)
-        || type.equals_ignoring_ascii_case("image/jpeg"sv)
-        || type.equals_ignoring_ascii_case("image/jpg"sv)
-        || type.equals_ignoring_ascii_case("image/pjpeg"sv)
-        || type.equals_ignoring_ascii_case("image/jxl"sv)
-        || type.equals_ignoring_ascii_case("image/png"sv)
-        || type.equals_ignoring_ascii_case("image/apng"sv)
-        || type.equals_ignoring_ascii_case("image/x-png"sv)
-        || type.equals_ignoring_ascii_case("image/tiff"sv)
-        || type.equals_ignoring_ascii_case("image/tinyvg"sv)
-        || type.equals_ignoring_ascii_case("image/webp"sv)
-        || type.equals_ignoring_ascii_case("image/svg+xml"sv))
-        return true;
+    auto image_data = m_current_request->image_data();
+    return image_data && image_data->is_animated() && image_data->frame_count() > 1;
+}
 
-    return false;
+void HTMLImageElement::start_animation_timer_if_visible()
+{
+    if (!current_request_has_running_animation()) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
+        return;
+    }
+
+    if (document().visibility_state_value() == VisibilityState::Hidden) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = true;
+        return;
+    }
+
+    m_animation_paused_by_visibility = false;
+    m_animation_timer->start();
 }
 
 // https://html.spec.whatwg.org/multipage/images.html#update-the-source-set
@@ -1135,7 +1307,7 @@ static void update_the_source_set(DOM::Element& element)
         TODO();
 
     // 2. Let elements be « el ».
-    GC::RootVector<DOM::Element*> elements(element.heap());
+    GC::RootVector<DOM::Element*> elements;
     elements.append(&element);
 
     // 3. If el is an img element whose parent node is a picture element,
@@ -1241,25 +1413,22 @@ static void update_the_source_set(DOM::Element& element)
         // 8. If child has a type attribute, and its value is an unknown or unsupported MIME type, continue to the next child.
         if (child->has_attribute(HTML::AttributeNames::type)) {
             auto mime_type = child->get_attribute_value(HTML::AttributeNames::type);
-            if (is<HTMLImageElement>(element)) {
-                if (!is_supported_image_type(mime_type))
-                    continue;
-            }
-
-            // FIXME: Implement this step for link elements
+            if (!is_supported_image_type(mime_type))
+                continue;
         }
 
-        // FIXME: 9. If child has width or height attributes, set el's dimension attribute source to child.
-        //           Otherwise, set el's dimension attribute source to el.
+        // 9. If child has width or height attributes, set el's dimension attribute source to child.
+        //    Otherwise, set el's dimension attribute source to el.
+        if (child->has_attribute(HTML::AttributeNames::width) || child->has_attribute(HTML::AttributeNames::height))
+            img->set_dimension_attribute_source(child);
+        else
+            img->set_dimension_attribute_source(nullptr);
 
         // 10. Normalize the source densities of source set.
         source_set.normalize_source_densities(element);
 
         // 11. Set el's source set to source set.
-        if (auto* image_element = as_if<HTMLImageElement>(element))
-            image_element->set_source_set(move(source_set));
-        else if (is<HTMLLinkElement>(element))
-            TODO();
+        img->set_source_set(move(source_set));
 
         // 12. Return.
         return;
@@ -1287,12 +1456,19 @@ void HTMLImageElement::set_source_set(SourceSet source_set)
 
 void HTMLImageElement::animate()
 {
+    if (document().visibility_state_value() == VisibilityState::Hidden) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = true;
+        return;
+    }
+
     auto image_data = m_current_request->image_data();
     if (!image_data) {
         return;
     }
 
     m_current_frame_index = (m_current_frame_index + 1) % image_data->frame_count();
+    m_current_frame_index = image_data->notify_frame_advanced(m_current_frame_index);
     auto current_frame_duration = image_data->frame_duration(m_current_frame_index);
 
     if (current_frame_duration != m_animation_timer->interval()) {
@@ -1303,11 +1479,11 @@ void HTMLImageElement::animate()
         ++m_loops_completed;
         if (m_loops_completed > 0 && m_loops_completed == image_data->loop_count()) {
             m_animation_timer->stop();
+            m_animation_paused_by_visibility = false;
         }
     }
 
-    if (paintable())
-        paintable()->set_needs_display();
+    set_needs_repaint();
 }
 
 bool HTMLImageElement::allows_auto_sizes() const

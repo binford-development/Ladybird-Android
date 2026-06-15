@@ -1,5 +1,5 @@
 {
-  "builtin-baseline": "2fa7118fb2ce0c27ab73e08ab1991f4cb67af880",
+  "builtin-baseline": "48cfe1e0e928341709d97fc3d2eff10ad6262c96",
   "dependencies": [
     {
       "name": "angle",
@@ -55,6 +55,7 @@
         "zlib"
       ]
     },
+    "fmt",
     {
       "name": "fontconfig",
       "platform": "linux | bsd | osx"
@@ -76,6 +77,16 @@
       ]
     },
     "icu",
+    {
+      "name": "libavif",
+      "features": [
+        "dav1d"
+      ]
+    },
+    {
+      "name": "libdwarf",
+      "platform": "linux | windows | osx"
+    },
     "libjpeg-turbo",
     "libjxl",
     {
@@ -88,11 +99,10 @@
       "name": "libproxy",
       "platform": "!(android | bsd)"
     },
+    "libpsl",
     {
-      "name": "libavif",
-      "features": [
-        "dav1d"
-      ]
+      "name": "libedit",
+      "platform": "!windows & !android"
     },
     "libtommath",
     {
@@ -103,58 +113,14 @@
         "simd"
       ]
     },
+    "libxml2",
     {
       "name": "mman",
       "platform": "windows"
     },
-    "libxml2",
+    "mimalloc",
     "openssl",
-    {
-      "name": "qtbase",
-      "platform": "freebsd",
-      "default-features": false,
-      "features": [
-        "dbus",
-        "doubleconversion",
-        "fontconfig",
-        "freetype",
-        "gui",
-        "icu",
-        "jpeg",
-        "network",
-        "opengl",
-        "pcre2",
-        "png",
-        "thread",
-        "vulkan",
-        "widgets",
-        "xcb",
-        "xcb-xlib",
-        "xlib",
-        "xrender",
-        "zstd"
-      ]
-    },
-    {
-      "name": "qtbase",
-      "platform": "windows",
-      "default-features": false,
-      "features": [
-        "doubleconversion",
-        "freetype",
-        "gui",
-        "icu",
-        "jpeg",
-        "network",
-        "opengl",
-        "pcre2",
-        "png",
-        "thread",
-        "vulkan",
-        "widgets",
-        "zstd"
-      ]
-    },
+    "pdfjs",
     {
       "name": "pthread",
       "platform": "windows"
@@ -184,7 +150,7 @@
         "freetype",
         "harfbuzz",
         "icu",
-        "vulkan"
+        "direct3d"
       ]
     },
     {
@@ -208,17 +174,99 @@
       ]
     },
     "sqlite3",
-    "vulkan",
     {
       "name": "tiff",
       "features": [
         "zstd"
       ]
     },
-    "vulkan-headers",
+    {
+      "name": "vulkan",
+      "platform": "linux | bsd | android"
+    },
+    {
+      "name": "vulkan-headers",
+      "platform": "linux | bsd | android"
+    },
     "woff2",
+    "wuffs",
     "zlib"
   ],
+  "features": {
+    "gtk": {
+      "description": "Build with GTK 4 GUI framework",
+      "dependencies": [
+        {
+          "name": "libadwaita",
+          "platform": "linux | osx"
+        },
+        {
+          "name": "wayland",
+          "platform": "linux",
+          "features": [
+            "force-build"
+          ]
+        },
+        {
+          "name": "wayland-protocols",
+          "platform": "linux",
+          "features": [
+            "force-build"
+          ]
+        }
+      ]
+    },
+    "qt": {
+      "description": "Build with Qt 6 GUI framework",
+      "dependencies": [
+        {
+          "name": "qtbase",
+          "platform": "freebsd",
+          "default-features": false,
+          "features": [
+            "dbus",
+            "doubleconversion",
+            "fontconfig",
+            "freetype",
+            "gui",
+            "icu",
+            "jpeg",
+            "network",
+            "opengl",
+            "pcre2",
+            "png",
+            "thread",
+            "vulkan",
+            "widgets",
+            "xcb",
+            "xcb-xlib",
+            "xlib",
+            "xrender",
+            "zstd"
+          ]
+        },
+        {
+          "name": "qtbase",
+          "platform": "windows",
+          "default-features": false,
+          "features": [
+            "doubleconversion",
+            "freetype",
+            "gui",
+            "icu",
+            "jpeg",
+            "network",
+            "opengl",
+            "pcre2",
+            "png",
+            "thread",
+            "widgets",
+            "zstd"
+          ]
+        }
+      ]
+    }
+  },
   "overrides": [
     {
       "name": "angle",
@@ -226,11 +274,11 @@
     },
     {
       "name": "cpptrace",
-      "version": "1.0.2"
+      "version": "1.0.2#0"
     },
     {
       "name": "curl",
-      "version": "8.16.0#0"
+      "version": "8.19.0#0"
     },
     {
       "name": "dav1d",
@@ -253,16 +301,44 @@
       "version": "7.1.1#5"
     },
     {
+      "name": "fmt",
+      "version": "12.1.0#0"
+    },
+    {
+      "name": "gtk",
+      "version": "4.22.0#0"
+    },
+    {
       "name": "fontconfig",
-      "version": "2.15.0#4"
+      "version": "2.17.1#1"
     },
     {
       "name": "harfbuzz",
       "version": "10.2.0#0"
     },
     {
+      "name": "highway",
+      "version": "1.4.0#0"
+    },
+    {
       "name": "icu",
-      "version": "78.1#1"
+      "version": "78.2#0"
+    },
+    {
+      "name": "libadwaita",
+      "version": "1.8.4#0"
+    },
+    {
+      "name": "libavif",
+      "version": "1.3.0#1"
+    },
+    {
+      "name": "libdwarf",
+      "version": "2.3.0#0"
+    },
+    {
+      "name": "libedit",
+      "version": "2024-08-08#0"
     },
     {
       "name": "libjpeg-turbo",
@@ -281,12 +357,12 @@
       "version": "0.4.18#3"
     },
     {
-      "name": "libtommath",
-      "version": "1.3.0#2"
+      "name": "libpsl",
+      "version": "0.21.5#1"
     },
     {
-      "name": "libavif",
-      "version": "1.3.0#1"
+      "name": "libtommath",
+      "version": "1.3.0#2"
     },
     {
       "name": "libwebp",
@@ -297,12 +373,28 @@
       "version": "2.13.8#1"
     },
     {
+      "name": "mimalloc",
+      "version": "2.2.7#0"
+    },
+    {
       "name": "mman",
       "version": "git-f5ff813#5"
     },
     {
+      "name": "nghttp2",
+      "version": "1.68.0#1"
+    },
+    {
       "name": "openssl",
       "version": "3.5.3#0"
+    },
+    {
+      "name": "pdfjs",
+      "version": "5.6.205#0"
+    },
+    {
+      "name": "pthread",
+      "version": "3.0.0#2"
     },
     {
       "name": "qtbase",
@@ -326,15 +418,39 @@
     },
     {
       "name": "sqlite3",
-      "version": "3.50.4#0"
+      "version": "3.52.0#0"
+    },
+    {
+      "name": "tiff",
+      "version": "4.7.1#0"
+    },
+    {
+      "name": "vulkan",
+      "version": "2023-12-17#0"
+    },
+    {
+      "name": "vulkan-headers",
+      "version": "1.4.335.0#0"
+    },
+    {
+      "name": "wayland",
+      "version": "1.24.0#0"
+    },
+    {
+      "name": "wayland-protocols",
+      "version": "1.44#0"
     },
     {
       "name": "woff2",
       "version": "1.0.2#5"
     },
     {
+      "name": "wuffs",
+      "version": "0.3.4#0"
+    },
+    {
       "name": "zlib",
-      "version": "1.3.1"
+      "version": "1.3.1#0"
     }
   ]
 }

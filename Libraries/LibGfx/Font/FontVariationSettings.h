@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#pragma once
+
 #include <AK/HashMap.h>
 #include <AK/QuickSort.h>
 #include <AK/Vector.h>
 #include <LibGfx/FourCC.h>
-
-#pragma once
+#include <LibIPC/Forward.h>
 
 namespace Gfx {
 
@@ -47,6 +48,12 @@ struct FontVariationSettings {
         axes.set(FourCC("wdth"), value);
     }
 
+    // https://learn.microsoft.com/en-us/typography/opentype/spec/dvaraxistag_opsz
+    void set_optical_sizing(float value)
+    {
+        axes.set(FourCC("opsz"), value);
+    }
+
     bool is_empty() const { return axes.is_empty(); }
 
     Vector<FontVariationAxis> to_sorted_list() const
@@ -64,5 +71,15 @@ struct FontVariationSettings {
         return list;
     }
 };
+
+}
+
+namespace IPC {
+
+template<>
+ErrorOr<void> encode(Encoder&, Gfx::FontVariationSettings const&);
+
+template<>
+ErrorOr<Gfx::FontVariationSettings> decode(Decoder&);
 
 }

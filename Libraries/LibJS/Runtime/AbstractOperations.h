@@ -8,6 +8,9 @@
 
 #include <AK/Concepts.h>
 #include <AK/Forward.h>
+#include <AK/HashTable.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/Utf16FlyString.h>
 #include <LibCrypto/Forward.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/Export.h>
@@ -45,7 +48,7 @@ bool is_compatible_property_descriptor(bool extensible, PropertyDescriptor&, Opt
 bool validate_and_apply_property_descriptor(Object*, PropertyKey const&, bool extensible, PropertyDescriptor&, Optional<PropertyDescriptor> const& current);
 JS_API ThrowCompletionOr<Object*> get_prototype_from_constructor(VM&, FunctionObject const& constructor, GC::Ref<Object> (Intrinsics::*intrinsic_default_prototype)());
 Object* create_unmapped_arguments_object(VM&, ReadonlySpan<Value> arguments);
-Object* create_mapped_arguments_object(VM&, FunctionObject&, NonnullRefPtr<FunctionParameters const> const&, ReadonlySpan<Value> arguments, Environment&);
+Object* create_mapped_arguments_object(VM&, FunctionObject&, ReadonlySpan<Utf16FlyString> parameter_names, ReadonlySpan<Value> arguments, Environment&);
 
 // 2.1.1 DisposeCapability Records, https://tc39.es/proposal-explicit-resource-management/#sec-disposecapability-records
 struct JS_API DisposeCapability {
@@ -88,7 +91,30 @@ enum class CallerMode {
 
 ThrowCompletionOr<Value> perform_eval(VM&, Value, CallerMode, EvalMode);
 
-ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, Program const& program, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict);
+struct EvalDeclarationData {
+    Vector<Utf16FlyString> var_names;
+
+    struct FunctionToInitialize {
+        GC::Root<SharedFunctionInstanceData> shared_data;
+        Utf16FlyString name;
+    };
+    Vector<FunctionToInitialize> functions_to_initialize;
+    HashTable<Utf16FlyString> declared_function_names;
+
+    Vector<Utf16FlyString> var_scoped_names;
+
+    Vector<Utf16FlyString> annex_b_candidate_names;
+
+    struct LexicalBinding {
+        Utf16FlyString name;
+        bool is_constant { false };
+    };
+    Vector<LexicalBinding> lexical_bindings;
+
+    Vector<Utf16FlyString> referenced_private_names;
+};
+
+ThrowCompletionOr<void> eval_declaration_instantiation(VM& vm, EvalDeclarationData&, Environment* variable_environment, Environment* lexical_environment, PrivateEnvironment* private_environment, bool strict);
 
 // 7.3.14 Call ( F, V [ , argumentsList ] ), https://tc39.es/ecma262/#sec-call
 ALWAYS_INLINE ThrowCompletionOr<Value> call(VM& vm, Value function, Value this_value, ReadonlySpan<Value> arguments_list)
@@ -175,7 +201,7 @@ ALWAYS_INLINE ThrowCompletionOr<GC::Ref<T>> ordinary_create_from_constructor(VM&
 
 // 7.3.35 AddValueToKeyedGroup ( groups, key, value ), https://tc39.es/ecma262/#sec-add-value-to-keyed-group
 template<typename GroupsType, typename KeyType>
-void add_value_to_keyed_group(VM& vm, GroupsType& groups, KeyType key, Value value)
+void add_value_to_keyed_group(GroupsType& groups, KeyType key, Value value)
 {
     // 1. For each Record { [[Key]], [[Elements]] } g of groups, do
     //      a. If SameValue(g.[[Key]], key) is true, then
@@ -193,7 +219,7 @@ void add_value_to_keyed_group(VM& vm, GroupsType& groups, KeyType key, Value val
     }
 
     // 2. Let group be the Record { [[Key]]: key, [[Elements]]: « value » }.
-    GC::RootVector<Value> new_elements { vm.heap() };
+    GC::RootVector<Value> new_elements;
     new_elements.append(value);
 
     // 3. Append group as the last element of groups.
@@ -256,7 +282,7 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
             // ii. IfAbruptCloseIterator(key, iteratorRecord).
             auto property_key = TRY_OR_CLOSE_ITERATOR(vm, iterator_record, key.to_property_key(vm));
 
-            add_value_to_keyed_group(vm, groups, move(property_key), value);
+            add_value_to_keyed_group(groups, move(property_key), value);
         }
         // h. Else,
         else {
@@ -266,7 +292,7 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
             // ii. Set key to CanonicalizeKeyedCollectionKey(key).
             key = canonicalize_keyed_collection_key(key);
 
-            add_value_to_keyed_group(vm, groups, make_root(key), value);
+            add_value_to_keyed_group(groups, make_root(key), value);
         }
 
         // i. Perform AddValueToKeyedGroup(groups, key, value).
@@ -322,12 +348,6 @@ auto remainder(Crypto::BigInteger auto const& x, Crypto::BigInteger auto const& 
     VERIFY(!y.is_zero());
     return x.divided_by(y).remainder;
 }
-
-// 14.3 The Year-Week Record Specification Type, https://tc39.es/proposal-temporal/#sec-year-week-record-specification-type
-struct YearWeek {
-    Optional<u8> week;
-    Optional<i32> year;
-};
 
 // 14.5.1.1 ToIntegerIfIntegral ( argument ), https://tc39.es/proposal-temporal/#sec-tointegerifintegral
 template<typename... Args>

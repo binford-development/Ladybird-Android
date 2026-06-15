@@ -130,17 +130,15 @@ describe("special left hand sides", () => {
         expect(f().a).toBe("c");
     });
 
-    test.xfail("call function is allowed in parsing but fails in runtime", () => {
-        function f() {
-            expect().fail();
-        }
+    test("call expression as for-of LHS is valid in non-strict mode", () => {
+        // In non-strict mode, call expressions are allowed as for-of LHS
+        // (web compat), but they fail at runtime with ReferenceError.
+        expect("for (f() of []);").toEval();
+        expect("for (f() of [0]) {}").toEval();
+    });
 
-        // Does not fail since it does not iterate but prettier does not like it so we use eval.
-        expect("for (f() of []);").toEvalTo(undefined);
-
-        expect(() => {
-            eval("for (f() of [0]) { expect().fail() }");
-        }).toThrowWithMessage(ReferenceError, "Invalid left-hand side in assignment");
+    test("call expression as for-of LHS is SyntaxError in strict mode", () => {
+        expect("'use strict'; for (f() of []);").not.toEval();
     });
 
     test("Cannot change constant declaration in body", () => {
@@ -148,6 +146,18 @@ describe("special left hand sides", () => {
         for (const v of [1, 2]) {
             expect(() => v++).toThrowWithMessage(TypeError, "Invalid assignment to const variable");
             vals.push(v);
+        }
+
+        expect(vals).toEqual([1, 2]);
+    });
+
+    test("Cannot change destructured constant declaration in body", () => {
+        const vals = [];
+        for (const [value] of [[1], [2]]) {
+            expect(() => {
+                value = 3;
+            }).toThrowWithMessage(TypeError, "Invalid assignment to const variable");
+            vals.push(value);
         }
 
         expect(vals).toEqual([1, 2]);

@@ -8,10 +8,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Assertions.h>
 #include <AK/String.h>
 #include <AK/Utf16View.h>
+#include <AK/Vector.h>
+#include <AK/Windows.h>
 #include <LibCore/Process.h>
-#include <windows.h>
 
 namespace Core {
 
@@ -98,16 +100,31 @@ ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> argume
     });
 }
 
+void Process::terminate_immediately(int status)
+{
+    // TerminateProcess() is stronger than the CRT's _exit(), since it skips
+    // DLL detach notifications and the other ExitProcess() teardown paths.
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(status));
+    VERIFY_NOT_REACHED();
+}
+
 // Get the full path of the executable file of the current process
 ErrorOr<String> Process::get_name()
 {
-    wchar_t path[MAX_PATH] = {};
+    Vector<wchar_t, MAX_PATH> path;
+    path.resize(MAX_PATH);
 
-    DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+    DWORD length = GetModuleFileNameW(NULL, path.data(), MAX_PATH);
+
+    if (length == path.size() && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        path.resize(UNICODE_STRING_MAX_CHARS);
+        length = GetModuleFileNameW(NULL, path.data(), UNICODE_STRING_MAX_CHARS);
+    }
+
     if (!length)
         return Error::from_windows_error();
 
-    return MUST(Utf16View { reinterpret_cast<char16_t const*>(path), length }.to_utf8());
+    return MUST(Utf16View { reinterpret_cast<char16_t const*>(path.data()), length }.to_utf8());
 }
 
 ErrorOr<bool> Process::is_being_debugged()

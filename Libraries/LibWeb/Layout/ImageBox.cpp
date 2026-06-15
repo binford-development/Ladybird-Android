@@ -6,6 +6,8 @@
 
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DecodedImageData.h>
+#include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/HTMLObjectElement.h>
 #include <LibWeb/Layout/ImageBox.h>
 #include <LibWeb/Layout/ImageProvider.h>
 #include <LibWeb/Painting/ImagePaintable.h>
@@ -13,49 +15,73 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(ImageBox);
-
-ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, GC::Ref<CSS::ComputedProperties> style, ImageProvider const& image_provider)
-    : ReplacedBox(document, element, move(style))
-    , m_image_provider(image_provider)
+static ImageProvider const& image_provider_for_element(DOM::Element const& element)
 {
+    if (auto const* image = as_if<HTML::HTMLImageElement>(element))
+        return *image;
+    if (auto const* input = as_if<HTML::HTMLInputElement>(element))
+        return *input;
+    if (auto const* object = as_if<HTML::HTMLObjectElement>(element))
+        return *object;
+
+    VERIFY_NOT_REACHED();
+}
+
+ImageBox::ImageBox(DOM::Document& document, GC::Ptr<DOM::Element> element, CSS::ComputedProperties const& style, ImageProvider const& image_provider)
+    : ReplacedBox(document, element, style)
+{
+    VERIFY(element);
+    VERIFY(&image_provider == &image_provider_for_element(*element));
+}
+
+ImageBox::ImageBox(DOM::Document& document, CSS::ComputedProperties const& style, NonnullOwnPtr<ImageProvider> image_provider)
+    : ReplacedBox(document, nullptr, style)
+    , m_owned_image_provider(move(image_provider))
+{
+}
+
+ImageProvider const& ImageBox::image_provider() const
+{
+    if (m_owned_image_provider)
+        return *m_owned_image_provider;
+
+    auto element = dom_node();
+    VERIFY(element);
+
+    return image_provider_for_element(*element);
 }
 
 ImageBox::~ImageBox() = default;
 
-void ImageBox::visit_edges(JS::Cell::Visitor& visitor)
+CSS::SizeWithAspectRatio ImageBox::natural_size() const
 {
-    Base::visit_edges(visitor);
-    m_image_provider.image_provider_visit_edges(visitor);
-}
-
-void ImageBox::prepare_for_replaced_layout()
-{
-    set_natural_width(m_image_provider.intrinsic_width());
-    set_natural_height(m_image_provider.intrinsic_height());
-    set_natural_aspect_ratio(m_image_provider.intrinsic_aspect_ratio());
-
-    if (renders_as_alt_text()) {
-        String alt;
-        if (auto element = dom_node())
-            alt = element->get_attribute_value(HTML::AttributeNames::alt);
-
-        if (alt.is_empty()) {
-            set_natural_width(0);
-            set_natural_height(0);
-        } else {
-            auto font = Platform::FontPlugin::the().default_font(12);
-            CSSPixels alt_text_width = m_cached_alt_text_width.ensure([&] {
-                return CSSPixels::nearest_value_for(font->width(Utf16String::from_utf8(alt)));
-            });
-            set_natural_width(alt_text_width + 16);
-            set_natural_height(CSSPixels::nearest_value_for(font->pixel_size()) + 16);
-        }
+    auto const& image_provider = this->image_provider();
+    if (image_provider.is_image_available()) {
+        return {
+            .width = image_provider.intrinsic_width(),
+            .height = image_provider.intrinsic_height(),
+            .aspect_ratio = image_provider.intrinsic_aspect_ratio()
+        };
     }
 
-    if (!has_natural_width() && !has_natural_height()) {
-        // FIXME: Do something.
-    }
+    String alt;
+    if (auto element = dom_node())
+        alt = element->get_attribute_value(HTML::AttributeNames::alt);
+    if (alt.is_empty())
+        return { 0, 0, {} };
+
+    auto font = Platform::FontPlugin::the().default_font(12);
+    CSSPixels alt_text_width = m_cached_alt_text_width.ensure([&] {
+        return CSSPixels::nearest_value_for(font->width(Utf16String::from_utf8(alt)));
+    });
+    auto width = alt_text_width + 16;
+    auto height = CSSPixels::nearest_value_for(font->pixel_size()) + 16;
+
+    Optional<CSSPixelFraction> aspect_ratio;
+    if (height > 0)
+        aspect_ratio = CSSPixelFraction(width, height);
+
+    return { width, height, aspect_ratio };
 }
 
 void ImageBox::dom_node_did_update_alt_text(Badge<ImageProvider>)
@@ -65,10 +91,10 @@ void ImageBox::dom_node_did_update_alt_text(Badge<ImageProvider>)
 
 bool ImageBox::renders_as_alt_text() const
 {
-    return !m_image_provider.is_image_available();
+    return !image_provider().is_image_available();
 }
 
-GC::Ptr<Painting::Paintable> ImageBox::create_paintable() const
+RefPtr<Painting::Paintable> ImageBox::create_paintable() const
 {
     return Painting::ImagePaintable::create(*this);
 }

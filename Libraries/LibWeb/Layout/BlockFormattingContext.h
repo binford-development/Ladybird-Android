@@ -65,6 +65,7 @@ public:
     void layout_block_level_box(Box const&, BlockContainer const&, CSSPixels& bottom_of_lowest_margin_box, AvailableSpace const&);
 
     void resolve_vertical_box_model_metrics(Box const&, CSSPixels width_of_containing_block);
+    void resolve_horizontal_box_model_metrics(Box const&, CSSPixels width_of_containing_block);
 
     enum class DidIntroduceClearance {
         Yes,
@@ -76,7 +77,7 @@ public:
     void reset_margin_state() { m_margin_state.reset(); }
 
     struct FloatingBox {
-        GC::Ref<Box const> box;
+        Box const& box;
 
         LayoutState::UsedValues& used_values;
 
@@ -101,16 +102,15 @@ private:
 
     void compute_width_for_block_level_replaced_element_in_normal_flow(Box const&, AvailableSpace const&);
 
-    void layout_viewport(AvailableSpace const&);
-
     void layout_block_level_children(BlockContainer const&, AvailableSpace const&);
     void layout_inline_children(BlockContainer const&, AvailableSpace const&);
+    void layout_fieldset_with_rendered_legend(FieldSetBox const&, AvailableSpace const&);
 
     void place_block_level_element_in_normal_flow_horizontally(Box const& child_box, AvailableSpace const&);
     void place_block_level_element_in_normal_flow_vertically(Box const&, CSSPixels y);
 
     void ensure_sizes_correct_for_left_offset_calculation(ListItemBox const&);
-    void layout_list_item_marker(ListItemBox const&, CSSPixels const& left_space_before_list_item_elements_formatted);
+    void layout_list_item_marker(ListItemBox const&, SpaceUsedByFloats const& inline_space_used_before_list_item_elements_formatted);
 
     void measure_scrollable_overflow(Box const&, CSSPixels& bottom_edge, CSSPixels& right_edge) const;
 
@@ -118,6 +118,9 @@ private:
     Optional<int> determine_used_value_for_column_count(CSSPixels const& U) const;
     CSSPixels determine_used_value_for_column_width(CSSPixels const& U, int N) const;
 
+    // https://drafts.csswg.org/css-multicol-2/#cw
+    CSSPixels get_column_width_used_value_for_multicol(CSSPixels const& U) const;
+    // https://www.w3.org/TR/css-align-3/#column-row-gap
     CSSPixels get_column_gap_used_value_for_multicol(CSSPixels const& U) const;
 
     enum class FloatSide {
@@ -163,6 +166,11 @@ private:
         void register_block_container_y_position_update_callback(ESCAPING Function<void(CSSPixels)> callback)
         {
             m_block_container_y_position_update_callback = move(callback);
+        }
+
+        void unregister_block_container_y_position_update_callback()
+        {
+            m_block_container_y_position_update_callback = {};
         }
 
         CSSPixels current_collapsed_margin() const

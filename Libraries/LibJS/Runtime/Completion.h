@@ -38,10 +38,7 @@ namespace JS {
             auto&& _temporary_result = (__VA_ARGS__));                                               \
         if (_temporary_result.is_error()) {                                                          \
             auto _completion = _temporary_result.release_error();                                    \
-                                                                                                     \
-            VERIFY(_completion.value().is_object());                                                 \
-            VERIFY(::AK::is<JS::InternalError>(_completion.value().as_object()));                    \
-                                                                                                     \
+            VERIFY(_completion.value().is<JS::InternalError>());                                     \
             return _completion;                                                                      \
         }                                                                                            \
         static_assert(!::AK::Detail::IsLvalueReference<decltype(_temporary_result.release_value())>, \
@@ -116,7 +113,7 @@ public:
 private:
     class EmptyTag {
     };
-    friend AK::Optional<Completion>;
+    friend struct AK::SentinelOptionalTraits<Completion>;
 
     constexpr Completion(EmptyTag)
         : m_type(Type::Empty)
@@ -138,88 +135,15 @@ private:
 namespace AK {
 
 template<>
-class Optional<JS::Completion> : public OptionalBase<JS::Completion> {
-    template<typename U>
-    friend class Optional;
+struct SentinelOptionalTraits<JS::Completion> {
+    static constexpr JS::Completion sentinel_value() { return JS::Completion(JS::Completion::EmptyTag {}); }
+    static constexpr bool is_sentinel(JS::Completion const& value) { return value.is_empty(); }
+};
 
+template<>
+class Optional<JS::Completion> : public SentinelOptional<JS::Completion> {
 public:
-    using ValueType = JS::Completion;
-
-    constexpr Optional() = default;
-
-    constexpr Optional(Optional<JS::Completion> const& other)
-    {
-        if (other.has_value())
-            m_value = other.m_value;
-    }
-
-    constexpr Optional(Optional&& other)
-        : m_value(move(other.m_value))
-    {
-    }
-
-    template<typename U = JS::Completion>
-    explicit(!IsConvertible<U&&, JS::Completion>) constexpr Optional(U&& value)
-    requires(!IsSame<RemoveCVReference<U>, Optional<JS::Completion>> && IsConstructible<JS::Completion, U &&>)
-        : m_value(forward<U>(value))
-    {
-    }
-
-    constexpr Optional& operator=(Optional const& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional&& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr void clear()
-    {
-        m_value = JS::Completion(JS::Completion::EmptyTag {});
-    }
-
-    [[nodiscard]] constexpr bool has_value() const
-    {
-        return !m_value.is_empty();
-    }
-
-    [[nodiscard]] constexpr JS::Completion& value() &
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr JS::Completion const& value() const&
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr JS::Completion value() &&
-    {
-        return release_value();
-    }
-
-    [[nodiscard]] constexpr JS::Completion release_value()
-    {
-        VERIFY(has_value());
-        JS::Completion released_value = m_value;
-        clear();
-        return released_value;
-    }
-
-private:
-    JS::Completion m_value { JS::Completion::EmptyTag {} };
+    using SentinelOptional::SentinelOptional;
 };
 
 }

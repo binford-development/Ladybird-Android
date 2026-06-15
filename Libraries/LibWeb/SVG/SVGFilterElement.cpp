@@ -7,11 +7,12 @@
  */
 
 #include <AK/StringConversions.h>
-#include <LibGfx/ImmutableBitmap.h>
-#include <LibWeb/Bindings/SVGFilterElementPrototype.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibWeb/Bindings/SVGFilterElement.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/SVG/SVGComponentTransferFunctionElement.h>
@@ -19,6 +20,7 @@
 #include <LibWeb/SVG/SVGFEColorMatrixElement.h>
 #include <LibWeb/SVG/SVGFEComponentTransferElement.h>
 #include <LibWeb/SVG/SVGFECompositeElement.h>
+#include <LibWeb/SVG/SVGFEDisplacementMapElement.h>
 #include <LibWeb/SVG/SVGFEDropShadowElement.h>
 #include <LibWeb/SVG/SVGFEFloodElement.h>
 #include <LibWeb/SVG/SVGFEFuncAElement.h>
@@ -31,6 +33,7 @@
 #include <LibWeb/SVG/SVGFEMergeNodeElement.h>
 #include <LibWeb/SVG/SVGFEMorphologyElement.h>
 #include <LibWeb/SVG/SVGFEOffsetElement.h>
+#include <LibWeb/SVG/SVGFETurbulenceElement.h>
 #include <LibWeb/SVG/SVGFilterElement.h>
 
 namespace Web::SVG {
@@ -258,8 +261,12 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
                 dbgln("SVGFEColorMatrixElement: Unknown type '{}' — skipping filter primitive", type_value);
             }
         } else if (auto* image_primitive = as_if<SVGFEImageElement>(node)) {
-            auto bitmap = image_primitive->current_image_bitmap({});
-            if (!bitmap)
+            auto image_data = image_primitive->image_data();
+            if (!image_data)
+                return IterationDecision::Continue;
+
+            auto frame = image_data->frame(0, {});
+            if (!frame.has_value())
                 return IterationDecision::Continue;
 
             auto src_rect = image_primitive->content_rect();
@@ -270,13 +277,17 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
             if (!dom_node)
                 return IterationDecision::Continue;
 
-            auto* paintable_box = dom_node->paintable_box();
+            // NB: We use the unsafe accessor here because this may be called
+            //     during layout update, before the layout-is-up-to-date flag
+            //     has been set. The paintable is valid since layout has already
+            //     been performed at this point.
+            auto paintable_box = dom_node->unsafe_paintable_box();
             if (!paintable_box)
                 return IterationDecision::Continue;
 
             auto dest_rect = Gfx::enclosing_int_rect(paintable_box->absolute_rect().to_type<float>());
             auto scaling_mode = CSS::to_gfx_scaling_mode(paintable_box->computed_values().image_rendering(), src_rect->size(), dest_rect.size());
-            root_filter = Gfx::Filter::image(*bitmap, *src_rect, dest_rect, scaling_mode);
+            root_filter = Gfx::Filter::image(*frame, *src_rect, dest_rect, scaling_mode);
             update_result_map(*image_primitive);
         } else if (auto* merge_primitive = as_if<SVGFEMergeElement>(node)) {
             Vector<Optional<Gfx::Filter>> merge_inputs;
@@ -359,6 +370,64 @@ Optional<Gfx::Filter> SVGFilterElement::gfx_filter(Layout::NodeWithStyle const& 
             // </feMerge>
             root_filter = Gfx::Filter::merge({ colored_shadow, input });
             update_result_map(*drop_shadow);
+        } else if (auto* turbulence = as_if<SVGFETurbulenceElement>(node)) {
+            auto base_frequency_x = turbulence->base_frequency_x()->base_val();
+            auto base_frequency_y = turbulence->base_frequency_y()->base_val();
+            auto num_octaves = turbulence->num_octaves()->base_val();
+            auto seed = turbulence->seed()->base_val();
+
+            auto type = [turbulence] {
+                auto turbulence_type = turbulence->type()->base_val();
+                switch (turbulence_type) {
+                case to_underlying(SVGFETurbulenceElement::TurbulenceType::Turbulence):
+                    return Gfx::TurbulenceType::Turbulence;
+                case to_underlying(SVGFETurbulenceElement::TurbulenceType::FractalNoise):
+                    return Gfx::TurbulenceType::FractalNoise;
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+            }();
+
+            auto tile_stitch_size = [turbulence] {
+                auto stitch_tiles = turbulence->stitch_tiles()->base_val();
+                switch (stitch_tiles) {
+                case to_underlying(SVGFETurbulenceElement::StitchType::Stitch):
+                    // FIXME: Are these the correct width and height?
+                    return Gfx::IntSize { turbulence->width()->base_val()->value(), turbulence->height()->base_val()->value() };
+                case to_underlying(SVGFETurbulenceElement::StitchType::NoStitch):
+                    return Gfx::IntSize {};
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+            }();
+
+            root_filter = Gfx::Filter::turbulence(type, base_frequency_x, base_frequency_y, num_octaves, seed, tile_stitch_size);
+            update_result_map(*turbulence);
+        } else if (auto* displacement_map = as_if<SVGFEDisplacementMapElement>(node)) {
+            auto color = resolve_input_filter(displacement_map->in1()->base_val());
+            auto displacement = resolve_input_filter(displacement_map->in2()->base_val());
+            auto scale = displacement_map->scale()->base_val();
+
+            auto convert_channel_selector = [](u16 channel_selector) {
+                switch (channel_selector) {
+                case to_underlying(SVGFEDisplacementMapElement::ChannelSelector::Red):
+                    return Gfx::ChannelSelector::Red;
+                case to_underlying(SVGFEDisplacementMapElement::ChannelSelector::Green):
+                    return Gfx::ChannelSelector::Green;
+                case to_underlying(SVGFEDisplacementMapElement::ChannelSelector::Blue):
+                    return Gfx::ChannelSelector::Blue;
+                case to_underlying(SVGFEDisplacementMapElement::ChannelSelector::Alpha):
+                    return Gfx::ChannelSelector::Alpha;
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+            };
+
+            auto x_channel_selector = convert_channel_selector(displacement_map->x_channel_selector()->base_val());
+            auto y_channel_selector = convert_channel_selector(displacement_map->y_channel_selector()->base_val());
+
+            root_filter = Gfx::Filter::displacement_map(color, displacement, scale, x_channel_selector, y_channel_selector);
+            update_result_map(*displacement_map);
         } else {
             dbgln("SVGFilterElement::gfx_filter(): Unknown or unsupported filter element '{}'", node.debug_description());
         }

@@ -9,14 +9,14 @@
 
 #include <AK/HashMap.h>
 #include <AK/NonnullRefPtr.h>
-#include <LibGC/CellAllocator.h>
+#include <AK/RefCounted.h>
 #include <LibGC/Ptr.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/FontCascadeList.h>
 #include <LibGfx/Forward.h>
-#include <LibJS/Heap/Cell.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/EasingFunction.h>
+#include <LibWeb/CSS/FontFeatureData.h>
 #include <LibWeb/CSS/LengthBox.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PseudoClass.h>
@@ -39,14 +39,13 @@ enum class AnimatedPropertyResultOfTransition : u8 {
     Yes
 };
 
-class WEB_API ComputedProperties final : public JS::Cell {
-    GC_CELL(ComputedProperties, JS::Cell);
-    GC_DECLARE_ALLOCATOR(ComputedProperties);
-
+class WEB_API ComputedProperties final : public RefCounted<ComputedProperties> {
 public:
+    static NonnullRefPtr<ComputedProperties> create();
+
     static constexpr double normal_line_height_scale = 1.15;
 
-    virtual ~ComputedProperties() override;
+    ~ComputedProperties();
 
     template<typename Callback>
     inline void for_each_property(Callback callback) const
@@ -56,6 +55,8 @@ public:
                 callback(static_cast<PropertyID>(i + to_underlying(first_longhand_property_id)), *m_property_values[i]);
         }
     }
+
+    void for_each_anchor_name(Function<void(FlyString const&)>) const;
 
     enum class Inherited {
         No,
@@ -69,10 +70,14 @@ public:
     bool is_property_inherited(PropertyID property_id) const;
     bool is_animated_property_inherited(PropertyID property_id) const;
     bool is_animated_property_result_of_transition(PropertyID property_id) const;
+    bool depends_on_viewport_metrics() const { return m_depends_on_viewport_metrics; }
+    bool font_metrics_depend_on_viewport_metrics() const { return m_font_metrics_depend_on_viewport_metrics; }
     void set_property_important(PropertyID, Important);
     void set_property_inherited(PropertyID, Inherited);
     void set_animated_property_inherited(PropertyID, Inherited);
     void set_animated_property_result_of_transition(PropertyID, AnimatedPropertyResultOfTransition);
+    void set_depends_on_viewport_metrics() { m_depends_on_viewport_metrics = true; }
+    void set_font_metrics_depend_on_viewport_metrics() { m_font_metrics_depend_on_viewport_metrics = true; }
 
     void set_property(PropertyID, NonnullRefPtr<StyleValue const> value, Inherited = Inherited::No, Important = Important::No);
     void set_property_without_modifying_flags(PropertyID, NonnullRefPtr<StyleValue const> value);
@@ -88,17 +93,13 @@ public:
     Size size_value(PropertyID) const;
     [[nodiscard]] Variant<LengthPercentage, NormalGap> gap_value(PropertyID) const;
     Length length(PropertyID) const;
-    enum class ClampNegativeLengths {
-        No,
-        Yes,
-    };
-    Optional<LengthPercentage> length_percentage(PropertyID, Layout::NodeWithStyle const&, ClampNegativeLengths) const;
-    LengthBox length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, Layout::NodeWithStyle const&, ClampNegativeLengths, LengthPercentageOrAuto const& default_value) const;
-    Color color_or_fallback(PropertyID, ColorResolutionContext, Color fallback) const;
+    LengthBox length_box(PropertyID left_id, PropertyID top_id, PropertyID right_id, PropertyID bottom_id, LengthPercentageOrAuto const& default_value) const;
+    Color color(PropertyID, ColorResolutionContext) const;
     HashMap<PropertyID, StyleValueVector> assemble_coordinated_value_list(PropertyID base_property_id, Vector<PropertyID> const& property_ids) const;
     ColorInterpolation color_interpolation() const;
     PreferredColorScheme color_scheme(PreferredColorScheme, Optional<Vector<String> const&> document_supported_schemes) const;
     TextAnchor text_anchor() const;
+    Optional<BaselineMetric> dominant_baseline() const;
     TextAlign text_align() const;
     TextJustify text_justify() const;
     TextOverflow text_overflow() const;
@@ -106,9 +107,10 @@ public:
     CSSPixels text_underline_offset() const;
     TextUnderlinePosition text_underline_position() const;
     Vector<BackgroundLayerData> background_layers() const;
+    Vector<BackgroundLayerData> mask_layers() const;
     BackgroundBox background_color_clip() const;
-    Length border_spacing_horizontal(Layout::Node const&) const;
-    Length border_spacing_vertical(Layout::Node const&) const;
+    Length border_spacing_horizontal() const;
+    Length border_spacing_vertical() const;
     CaptionSide caption_side() const;
     Clip clip() const;
     Display display() const;
@@ -132,13 +134,14 @@ public:
     LineStyle line_style(PropertyID) const;
     OutlineStyle outline_style() const;
     Vector<TextDecorationLine> text_decoration_line() const;
+    TextDecorationSkipInk text_decoration_skip_ink() const;
     TextDecorationStyle text_decoration_style() const;
     TextDecorationThickness text_decoration_thickness() const;
     TextTransform text_transform() const;
     Vector<ShadowData> text_shadow(Layout::Node const&) const;
     TextIndentData text_indent() const;
     TextWrapMode text_wrap_mode() const;
-    ListStyleType list_style_type() const;
+    ListStyleType list_style_type(StyleScope const&) const;
     ListStylePosition list_style_position() const;
     FlexDirection flex_direction() const;
     FlexWrap flex_wrap() const;
@@ -146,7 +149,7 @@ public:
     float flex_grow() const;
     float flex_shrink() const;
     int order() const;
-    Optional<Color> accent_color(Layout::NodeWithStyle const&) const;
+    Color accent_color(ColorResolutionContext const&) const;
     AlignContent align_content() const;
     AlignItems align_items() const;
     AlignSelf align_self() const;
@@ -165,17 +168,17 @@ public:
     BoxSizing box_sizing() const;
     PointerEvents pointer_events() const;
     Variant<VerticalAlign, LengthPercentage> vertical_align() const;
-    Gfx::ShapeFeatures font_features() const;
-    Optional<Gfx::FontVariantAlternates> font_variant_alternates() const;
+    FontFeatureData font_feature_data() const;
+    Optional<FontVariantAlternates> font_variant_alternates() const;
     FontVariantCaps font_variant_caps() const;
-    Optional<Gfx::FontVariantEastAsian> font_variant_east_asian() const;
+    Optional<FontVariantEastAsian> font_variant_east_asian() const;
     FontVariantEmoji font_variant_emoji() const;
-    Optional<Gfx::FontVariantLigatures> font_variant_ligatures() const;
-    Optional<Gfx::FontVariantNumeric> font_variant_numeric() const;
+    Optional<FontVariantLigatures> font_variant_ligatures() const;
+    Optional<FontVariantNumeric> font_variant_numeric() const;
     FontVariantPosition font_variant_position() const;
     FontKerning font_kerning() const;
     Optional<FlyString> font_language_override() const;
-    HashMap<StringView, u8> font_feature_settings() const;
+    HashMap<FlyString, u8> font_feature_settings() const;
     HashMap<FlyString, double> font_variation_settings() const;
     GridTrackSizeList grid_auto_columns() const;
     GridTrackSizeList grid_auto_rows() const;
@@ -188,7 +191,7 @@ public:
     GridTrackPlacement grid_row_start() const;
     BorderCollapse border_collapse() const;
     CSS::EmptyCells empty_cells() const;
-    Vector<Vector<String>> grid_template_areas() const;
+    GridTemplateAreas grid_template_areas() const;
     ObjectFit object_fit() const;
     Position object_position() const;
     TableLayout table_layout() const;
@@ -199,6 +202,7 @@ public:
     Isolation isolation() const;
     TouchActionData touch_action() const;
     Containment contain() const;
+    Vector<FlyString> container_name() const;
     ContainerType container_type() const;
     MixBlendMode mix_blend_mode() const;
     Optional<FlyString> view_transition_name() const;
@@ -212,8 +216,9 @@ public:
         AnimationFillMode fill_mode;
         AnimationComposition composition;
         FlyString name;
+        GC::Ptr<Animations::AnimationTimeline> timeline;
     };
-    Vector<AnimationProperties> animations() const;
+    Vector<AnimationProperties> animations(DOM::AbstractElement const&) const;
     Vector<TransitionProperties> transitions() const;
 
     Display display_before_box_type_transformation() const;
@@ -232,7 +237,10 @@ public:
 
     MaskType mask_type() const;
     float stop_opacity() const;
+    Optional<SVGPaint> fill(ColorResolutionContext const&) const;
     float fill_opacity() const;
+    Optional<SVGPaint> stroke(ColorResolutionContext const&) const;
+    Vector<Variant<LengthPercentage, float>> stroke_dasharray() const;
     StrokeLinecap stroke_linecap() const;
     StrokeLinejoin stroke_linejoin() const;
     double stroke_miterlimit() const;
@@ -256,6 +264,7 @@ public:
     double font_weight() const;
     Percentage font_width() const;
     int font_slope() const;
+    FontOpticalSizing font_optical_sizing() const;
 
     bool operator==(ComputedProperties const&) const;
 
@@ -271,20 +280,14 @@ public:
 
     static NonnullRefPtr<Gfx::Font const> font_fallback(bool monospace, bool bold, float point_size);
 
-    bool has_attempted_match_against_pseudo_class(PseudoClass pseudo_class) const
-    {
-        return m_attempted_pseudo_class_matches.get(pseudo_class);
-    }
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> const& inheritance_dependent_specified_values() const { return m_inheritance_dependent_specified_values; }
+    void add_inheritance_dependent_specified_value(PropertyID property_id, NonnullRefPtr<StyleValue const> value) { m_inheritance_dependent_specified_values.set(property_id, move(value)); }
 
-    void set_attempted_pseudo_class_matches(PseudoClassBitmap const& results)
-    {
-        m_attempted_pseudo_class_matches = results;
-    }
+    RefPtr<StyleValue const> raw_cascaded_font_size() const { return m_raw_cascaded_font_size; }
+    void set_raw_cascaded_font_size(NonnullRefPtr<StyleValue const> value) { m_raw_cascaded_font_size = move(value); }
 
 private:
     ComputedProperties();
-
-    virtual void visit_edges(Visitor&) override;
 
     Overflow overflow(PropertyID) const;
     Vector<ShadowData> shadow(PropertyID, Layout::Node const&) const;
@@ -299,6 +302,8 @@ private:
     HashMap<PropertyID, NonnullRefPtr<StyleValue const>> m_animated_property_values;
 
     Display m_display_before_box_type_transformation { InitialValues::display() };
+    bool m_depends_on_viewport_metrics { false };
+    bool m_font_metrics_depend_on_viewport_metrics { false };
 
     RefPtr<Gfx::FontCascadeList const> m_cached_computed_font_list;
     RefPtr<Gfx::Font const> m_cached_first_available_computed_font;
@@ -310,7 +315,8 @@ private:
 
     Optional<CSSPixels> m_line_height;
 
-    PseudoClassBitmap m_attempted_pseudo_class_matches;
+    HashMap<PropertyID, NonnullRefPtr<StyleValue const>> m_inheritance_dependent_specified_values;
+    RefPtr<StyleValue const> m_raw_cascaded_font_size;
 };
 
 }

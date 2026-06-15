@@ -8,7 +8,7 @@
 #include <AK/Debug.h>
 #include <AK/StringBuilder.h>
 #include <LibTextCodec/Decoder.h>
-#include <LibWeb/Bindings/HTMLScriptElementPrototype.h>
+#include <LibWeb/Bindings/HTMLScriptElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/Document.h>
@@ -48,10 +48,20 @@ void HTMLScriptElement::initialize(JS::Realm& realm)
 void HTMLScriptElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    if (auto* script = m_result.get_pointer<GC::Ref<Script>>())
-        visitor.visit(*script);
+    m_result.visit(
+        [](ResultState::Uninitialized) {},
+        [](ResultState::Null) {},
+        [&]<typename T>(GC::Ref<T> result) { visitor.visit(result); });
     visitor.visit(m_parser_document);
     visitor.visit(m_preparation_time_document);
+}
+
+void HTMLScriptElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_document_load_event_delayer.has_value())
+        m_document_load_event_delayer.emplace(document());
 }
 
 void HTMLScriptElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
@@ -68,13 +78,9 @@ void HTMLScriptElement::attribute_changed(FlyString const& name, Optional<String
         if (namespace_.has_value())
             return;
 
-        // AD-HOC: This ensures that prepare_script() is not called when the src attribute is removed.
-        //         See: https://github.com/whatwg/html/pull/10188/files#r1685905457 for more information.
-        if (!value.has_value())
-            return;
-
-        // 2. If localName is src and element is connected, then run the script HTML element post-connection steps, given element.
-        if (is_connected())
+        // 2. If localName is src, value is not null, and element is connected, then run the script HTML element
+        //    post-connection steps, given element.
+        if (value.has_value() && is_connected())
             post_connection();
     } else if (name == HTML::AttributeNames::async) {
         // https://html.spec.whatwg.org/multipage/scripting.html#script-processing-model:script-force-async
@@ -118,11 +124,6 @@ void HTMLScriptElement::begin_delaying_document_load_event(DOM::Document& docume
 // https://html.spec.whatwg.org/multipage/scripting.html#execute-the-script-block
 void HTMLScriptElement::execute_script()
 {
-    // https://html.spec.whatwg.org/multipage/document-lifecycle.html#read-html
-    // Before any script execution occurs, the user agent must wait for scripts may run for the newly-created document to be true for document.
-    if (!m_document->ready_to_run_scripts())
-        main_thread_event_loop().spin_until(GC::create_function(heap(), [&] { return m_document->ready_to_run_scripts(); }));
-
     // 1. Let document be el's node document.
     GC::Ref<DOM::Document> document = this->document();
 
@@ -131,6 +132,10 @@ void HTMLScriptElement::execute_script()
         dbgln("HTMLScriptElement: Refusing to run script because the preparation time document is not the same as the node document.");
         return;
     }
+
+    // https://html.spec.whatwg.org/multipage/document-lifecycle.html#read-html
+    // Before any script execution occurs, the user agent must wait for scripts may run for the newly-created document to be true for document.
+    VERIFY(document->ready_to_run_scripts());
 
     // 3. Unblock rendering on el.
     unblock_rendering();
@@ -177,7 +182,7 @@ void HTMLScriptElement::execute_script()
         VERIFY(document->current_script() == nullptr);
 
         // 2. Run the module script given by el's result.
-        (void)as<JavaScriptModuleScript>(*m_result.get<GC::Ref<Script>>()).run();
+        (void)as<ModuleScript>(*m_result.get<GC::Ref<Script>>()).run();
     }
     // -> "importmap"
     else if (m_script_type == ScriptType::ImportMap) {
@@ -198,14 +203,11 @@ void HTMLScriptElement::execute_script()
 
 // https://w3c.github.io/trusted-types/dist/spec/#slot-value-verification
 // https://html.spec.whatwg.org/multipage/scripting.html#prepare-a-script
-// https://whatpr.org/html/9893/scripting.html#prepare-a-script
 void HTMLScriptElement::prepare_script()
 {
     // 1. If el's already started is true, then return.
-    if (m_already_started) {
-        dbgln("HTMLScriptElement: Refusing to run script because it has already started.");
+    if (m_already_started)
         return;
-    }
 
     // 2. Let parser document be el's parser document.
     GC::Ptr<DOM::Document> parser_document = m_parser_document;
@@ -232,10 +234,8 @@ void HTMLScriptElement::prepare_script()
     }
 
     // 8. If el is not connected, then return.
-    if (!is_connected()) {
-        dbgln("HTMLScriptElement: Refusing to run script because the element is not connected.");
+    if (!is_connected())
         return;
-    }
 
     // 9. If any of the following are true:
     //    - el has a type attribute whose value is the empty string;
@@ -504,9 +504,9 @@ void HTMLScriptElement::prepare_script()
         // 2. Switch on el's type:
         // -> "classic"
         if (m_script_type == ScriptType::Classic) {
-            // 1. Let script be the result of creating a classic script using source text, settings object's realm, base URL, and options.
+            // 1. Let script be the result of creating a classic script using source text, settings object, base URL, and options.
             // FIXME: Pass options.
-            auto script = ClassicScript::create(m_document->url().to_byte_string(), source_text_utf8, settings_object.realm(), base_url, m_source_line_number);
+            auto script = ClassicScript::create(m_document->url().to_byte_string(), source_text_utf8, settings_object, base_url, m_source_line_number);
 
             // 2. Mark as ready el given script.
             mark_as_ready(Result(move(script)));
@@ -646,9 +646,15 @@ void HTMLScriptElement::prepare_script()
 }
 
 // https://html.spec.whatwg.org/multipage/scripting.html#script-processing-model:children-changed-steps
-void HTMLScriptElement::children_changed(ChildrenChangedMetadata const* metadata)
+void HTMLScriptElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
+
+    // AD-HOC: Avoid running script on child removal, matching the behaviour of other browsers.
+    //         We also do not run script on child mutation, matching the behaviour of chromium and webkit.
+    //         See: https://github.com/whatwg/html/issues/12279
+    if (metadata.type != ChildrenChangedMetadata::Type::Inserted)
+        return;
 
     // 1. If the script element is not connected, then return.
     if (!is_connected())
@@ -684,6 +690,9 @@ void HTMLScriptElement::mark_as_ready(Result result)
 
     // 4. Set el's delaying the load event to false.
     m_document_load_event_delayer.clear();
+
+    if (m_preparation_time_document)
+        m_preparation_time_document->schedule_html_parser_end_check();
 }
 
 void HTMLScriptElement::unmark_as_already_started(Badge<DOM::Range>)
@@ -759,21 +768,28 @@ WebIDL::ExceptionOr<void> HTMLScriptElement::set_src(TrustedTypes::TrustedScript
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#the-textContent-idl-attribute
-Variant<GC::Root<TrustedTypes::TrustedScript>, Utf16String, Empty> HTMLScriptElement::text_content() const
+Variant<GC::Ref<TrustedTypes::TrustedScript>, Utf16String, Empty> HTMLScriptElement::text_content() const
 {
     // 1. Return the result of running get text content with this.
     return descendant_text_content();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#the-textContent-idl-attribute
-WebIDL::ExceptionOr<void> HTMLScriptElement::set_text_content(TrustedTypes::TrustedScriptOrString text)
+WebIDL::ExceptionOr<void> HTMLScriptElement::set_text_content(TrustedTypes::NullableTrustedScriptOrString text)
 {
+    // NOTE: We still require this from the base implementation.
+    // https://dom.spec.whatwg.org/#dom-node-textcontent
+    // The textContent setter steps are to, if the given value is null, act as if it was the empty string instead, and then run set text content with this and the given value.
+    TrustedTypes::TrustedScriptOrString non_null_text = text.has<Empty>()
+        ? ""_utf16
+        : text.downcast<TrustedTypes::TrustedScriptOrString>();
+
     // 1. Let value be the result of calling Get Trusted Type compliant string with
-    //    TrustedScript, this’s relevant global object, the given value, HTMLScriptElement textContent, and script.
+    //    TrustedScript, this's relevant global object, the given value, HTMLScriptElement textContent, and script.
     auto const value = TRY(TrustedTypes::get_trusted_type_compliant_string(
         TrustedTypes::TrustedTypeName::TrustedScript,
         HTML::relevant_global_object(*this),
-        text,
+        non_null_text,
         TrustedTypes::InjectionSink::HTMLScriptElement_textContent,
         TrustedTypes::Script.to_string()));
 

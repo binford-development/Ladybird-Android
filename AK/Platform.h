@@ -234,6 +234,15 @@
 #    define LIFETIME_BOUND
 #endif
 
+#if defined(MUST_UPCALL)
+#    undef MUST_UPCALL
+#endif
+#if defined(AK_COMPILER_CLANG)
+#    define MUST_UPCALL [[clang::annotate("must_upcall")]]
+#else
+#    define MUST_UPCALL
+#endif
+
 // GCC doesn't have __has_feature but clang does
 #ifndef __has_feature
 #    define __has_feature(...) 0
@@ -254,11 +263,11 @@
 #    define LSAN_IGNORE_OBJECT(base)
 #endif
 
-#if __has_feature(blocks)
+#if __has_feature(blocks) && defined(AK_OS_MACOS)
 #    define AK_HAS_BLOCKS
 #endif
 
-#if __has_feature(objc_arc)
+#if __has_feature(objc_arc) && defined(AK_OS_MACOS)
 #    define AK_HAS_OBJC_ARC
 #endif
 
@@ -283,12 +292,8 @@
 #endif
 
 #ifndef AK_SYSTEM_CACHE_ALIGNMENT_SIZE
-#    if ARCH(AARCH64) || ARCH(X86_64)
-#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE 64
-#    else
-#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE 128
-#    endif
-#endif /* AK_SYSTEM_CACHE_ALIGNMENT_SIZE */
+#    define AK_SYSTEM_CACHE_ALIGNMENT_SIZE __GCC_DESTRUCTIVE_SIZE
+#endif
 
 #ifdef AK_CACHE_ALIGNED
 #    undef AK_CACHE_ALIGNED

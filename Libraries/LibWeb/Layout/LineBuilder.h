@@ -25,6 +25,7 @@ public:
     void break_line(ForcedBreak, Optional<CSSPixels> next_item_width = {});
     void append_box(Box const&, CSSPixels leading_size, CSSPixels trailing_size, CSSPixels leading_margin, CSSPixels trailing_margin);
     void append_text_chunk(TextNode const&, size_t offset_in_node, size_t length_in_node, CSSPixels leading_size, CSSPixels trailing_size, CSSPixels leading_margin, CSSPixels trailing_margin, CSSPixels content_width, CSSPixels content_height, RefPtr<Gfx::GlyphRun>);
+    void append_static_position_marker(Box const&);
 
     // Returns whether a line break occurred.
     bool break_if_needed(CSSPixels next_item_width)
@@ -39,6 +40,8 @@ public:
     void update_last_line();
 
     void remove_last_line_if_empty();
+
+    void set_trailing_whitespace_on_previous_line();
 
     CSSPixels current_block_offset() const { return m_current_block_offset; }
 
@@ -67,6 +70,7 @@ private:
     CSS::WritingMode m_writing_mode { CSS::WritingMode::HorizontalTb };
 
     bool m_last_line_needs_update { false };
+    bool m_should_advance_to_last_line_box_bottom { false };
 };
 
 }

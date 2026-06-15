@@ -29,7 +29,7 @@ public:
     WebIDL::ExceptionOr<String> btoa(String const& data) const;
     WebIDL::ExceptionOr<String> atob(String const& data) const;
     void queue_microtask(WebIDL::CallbackType&);
-    WebIDL::ExceptionOr<JS::Value> structured_clone(JS::Value, StructuredSerializeOptions const&) const;
+    WebIDL::ExceptionOr<JS::Value> structured_clone(JS::Value, Bindings::StructuredSerializeOptions const&) const;
 
     GC::Ref<WebIDL::CallbackType> count_queuing_strategy_size_function();
     GC::Ref<WebIDL::CallbackType> byte_length_queuing_strategy_size_function();
@@ -49,6 +49,9 @@ public:
     ImportMap& import_map() { return m_import_map; }
     ImportMap const& import_map() const { return m_import_map; }
     void set_import_map(ImportMap const& import_map) { m_import_map = import_map; }
+
+    static WEB_API void set_experimental_interfaces_exposed(bool);
+    static WEB_API bool expose_experimental_interfaces();
 
 protected:
     void visit_edges(GC::Cell::Visitor&);

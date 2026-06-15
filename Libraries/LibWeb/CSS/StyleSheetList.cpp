@@ -6,11 +6,12 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/StyleSheetListPrototype.h>
+#include <LibWeb/Bindings/StyleSheetList.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleSheetInvalidation.h>
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::CSS {
@@ -88,6 +89,8 @@ void StyleSheetList::add_sheet(CSSStyleSheet& sheet)
 {
     sheet.add_owning_document_or_shadow_root(document_or_shadow_root());
 
+    sheet.load_pending_image_resources(document());
+
     if (m_sheets.is_empty()) {
         // This is the first sheet, append it to the list.
         m_sheets.append(sheet);
@@ -112,20 +115,7 @@ void StyleSheetList::add_sheet(CSSStyleSheet& sheet)
     //       If we don't do this, we invalidate now, and then again when Document updates media rules.
     sheet.evaluate_media_queries(document());
 
-    if (sheet.rules().length() == 0) {
-        // NOTE: If the added sheet has no rules, we don't have to invalidate anything.
-        return;
-    }
-
-    if (auto* shadow_root = as_if<DOM::ShadowRoot>(document_or_shadow_root())) {
-        if (auto* host = shadow_root->host()) {
-            host->invalidate_style(DOM::StyleInvalidationReason::StyleSheetListAddSheet);
-        }
-        shadow_root->style_scope().invalidate_rule_cache();
-    } else {
-        document_or_shadow_root().invalidate_style(DOM::StyleInvalidationReason::StyleSheetListAddSheet);
-        document_or_shadow_root().document().style_scope().invalidate_rule_cache();
-    }
+    invalidate_style_for_stylesheet_change(document_or_shadow_root(), sheet, DOM::StyleInvalidationReason::StyleSheetListAddSheet);
 }
 
 void StyleSheetList::remove_sheet(CSSStyleSheet& sheet)
@@ -134,20 +124,7 @@ void StyleSheetList::remove_sheet(CSSStyleSheet& sheet)
     bool did_remove = m_sheets.remove_first_matching([&](auto& entry) { return entry.ptr() == &sheet; });
     VERIFY(did_remove);
 
-    if (sheet.rules().length() == 0) {
-        // NOTE: If the removed sheet had no rules, we don't have to invalidate anything.
-        return;
-    }
-
-    if (auto* shadow_root = as_if<DOM::ShadowRoot>(document_or_shadow_root())) {
-        if (auto* host = shadow_root->host()) {
-            host->invalidate_style(DOM::StyleInvalidationReason::StyleSheetListRemoveSheet);
-        }
-        shadow_root->style_scope().invalidate_rule_cache();
-    } else {
-        document_or_shadow_root().invalidate_style(DOM::StyleInvalidationReason::StyleSheetListRemoveSheet);
-        document_or_shadow_root().document().style_scope().invalidate_rule_cache();
-    }
+    invalidate_style_for_stylesheet_change(document_or_shadow_root(), sheet, DOM::StyleInvalidationReason::StyleSheetListRemoveSheet);
 }
 
 GC::Ref<StyleSheetList> StyleSheetList::create(GC::Ref<DOM::Node> document_or_shadow_root)

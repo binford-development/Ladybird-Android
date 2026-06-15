@@ -13,24 +13,20 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(SVGSVGBox);
-
-SVGSVGBox::SVGSVGBox(DOM::Document& document, SVG::SVGSVGElement& element, GC::Ref<CSS::ComputedProperties> style)
+SVGSVGBox::SVGSVGBox(DOM::Document& document, SVG::SVGSVGElement& element, CSS::ComputedProperties const& style)
     : ReplacedBox(document, element, style)
 {
 }
 
-GC::Ptr<Painting::Paintable> SVGSVGBox::create_paintable() const
+RefPtr<Painting::Paintable> SVGSVGBox::create_paintable() const
 {
     return Painting::SVGSVGPaintable::create(*this);
 }
 
-void SVGSVGBox::prepare_for_replaced_layout()
+CSS::SizeWithAspectRatio SVGSVGBox::natural_size() const
 {
-    auto natural_metrics = SVG::SVGSVGElement::negotiate_natural_metrics(dom_node());
-    set_natural_width(natural_metrics.width);
-    set_natural_height(natural_metrics.height);
-    set_natural_aspect_ratio(natural_metrics.aspect_ratio);
+    auto metrics = SVG::SVGSVGElement::negotiate_natural_metrics(dom_node());
+    return { metrics.width, metrics.height, metrics.aspect_ratio };
 }
 
 }

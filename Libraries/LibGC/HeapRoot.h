@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/SourceLocation.h>
 #include <LibGC/Export.h>
 
@@ -13,12 +14,15 @@ namespace GC {
 
 struct GC_API HeapRoot {
     enum class Type {
+        ConservativeHashMap,
+        ConservativeHashTable,
         ConservativeVector,
         HeapFunctionCapturedPointer,
         MustSurviveGC,
         RegisterPointer,
         Root,
         RootHashMap,
+        RootHashTable,
         RootVector,
         StackPointer,
         VM,
@@ -26,6 +30,7 @@ struct GC_API HeapRoot {
 
     Type type;
     SourceLocation const* location { nullptr };
+    Optional<u32> stack_frame_index {};
 };
 
 }

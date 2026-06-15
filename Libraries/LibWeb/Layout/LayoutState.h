@@ -6,7 +6,10 @@
 
 #pragma once
 
-#include <AK/HashMap.h>
+#include <AK/BumpAllocator.h>
+#include <AK/HashTable.h>
+#include <AK/OwnPtr.h>
+#include <AK/kmalloc.h>
 #include <LibGfx/Path.h>
 #include <LibGfx/Point.h>
 #include <LibWeb/Layout/Box.h>
@@ -54,8 +57,94 @@ struct StaticPositionRect {
     }
 };
 
+// Sparse, index-based container using two-level page tables.
+// Layout state is throwaway — rebuilt on every layout pass — so a
+// flat vector pre-allocated for the entire tree wastes memory, while
+// a hash map pays hashing overhead on every access. Page tables give
+// O(1) lookup without hashing, allocating pages only on first write.
+template<typename T>
+class PagedStore {
+    static constexpr u32 PageBits = 4;
+    static constexpr u32 PageSize = 1u << PageBits;
+    static constexpr u32 PageMask = PageSize - 1;
+
+    struct Page {
+        AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Layout);
+
+        T* entries[PageSize] {};
+    };
+
+public:
+    PagedStore() = default;
+
+    PagedStore(PagedStore const&) = delete;
+    PagedStore& operator=(PagedStore const&) = delete;
+    PagedStore(PagedStore&&) = delete;
+    PagedStore& operator=(PagedStore&&) = delete;
+
+    void ensure_capacity(u32 count)
+    {
+        m_pages.resize((count + PageSize - 1) >> PageBits);
+    }
+
+    T* get(u32 index) const
+    {
+        auto page_index = index >> PageBits;
+        if (page_index >= m_pages.size())
+            return nullptr;
+        auto const& page = m_pages[page_index];
+        if (!page)
+            return nullptr;
+        return page->entries[index & PageMask];
+    }
+
+    T& allocate(u32 index)
+    {
+        auto page_index = index >> PageBits;
+        if (page_index >= m_pages.size())
+            m_pages.resize(page_index + 1);
+        auto& page = m_pages[page_index];
+        if (!page)
+            page = make<Page>();
+        auto& entry = page->entries[index & PageMask];
+        if (entry) {
+            *entry = T {};
+            return *entry;
+        }
+        entry = m_allocator.allocate();
+        VERIFY(entry);
+        return *entry;
+    }
+
+    template<typename Callback>
+    void for_each(Callback callback)
+    {
+        for (auto const& page : m_pages) {
+            if (!page)
+                continue;
+            for (auto& entry : page->entries) {
+                if (entry)
+                    callback(*entry);
+            }
+        }
+    }
+
+private:
+    static constexpr size_t BumpAllocatorChunkSize = 4 * KiB;
+
+    Vector<OwnPtr<Page>> m_pages;
+    UniformBumpAllocator<T, false, BumpAllocatorChunkSize> m_allocator;
+};
+
 struct LayoutState {
+    AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Layout);
+
     struct UsedValues {
+        UsedValues() = default;
+        UsedValues(UsedValues&&) = default;
+        UsedValues& operator=(UsedValues&&) = default;
+        UsedValues& operator=(UsedValues const& other);
+
         NodeWithStyle const& node() const { return *m_node; }
         NodeWithStyle& node() { return const_cast<NodeWithStyle&>(*m_node); }
         void set_node(NodeWithStyle const&, UsedValues const* containing_block_used_values);
@@ -83,9 +172,23 @@ struct LayoutState {
         // the constraint is used in that axis instead.
         AvailableSpace available_inner_space_or_constraints_from(AvailableSpace const& outer_space) const;
 
+        void materialize_from_paintable(Painting::PaintableBox const&);
+
         void set_content_offset(CSSPixelPoint new_offset) { offset = new_offset; }
         void set_content_x(CSSPixels x) { offset.set_x(x); }
         void set_content_y(CSSPixels y) { offset.set_y(y); }
+
+        // Offset from ICB (viewport) content edge to this box's content edge.
+        // Computed lazily by walking the containing block chain.
+        // For pre-populated nodes (partial relayout), returns the cached value from paintable absolute position.
+        CSSPixelPoint cumulative_offset() const
+        {
+            if (m_cumulative_offset.has_value())
+                return *m_cumulative_offset;
+            if (m_containing_block_used_values)
+                return m_containing_block_used_values->cumulative_offset() + offset;
+            return offset;
+        }
 
         // offset from top-left corner of content area of box's containing block to top-left corner of box's content area
         CSSPixelPoint offset;
@@ -131,50 +234,165 @@ struct LayoutState {
         CSSPixels border_box_width() const { return border_box_left() + content_width() + border_box_right(); }
         CSSPixels border_box_height() const { return border_box_top() + content_height() + border_box_bottom(); }
 
+        CSSPixels padding_box_width() const { return padding_left + content_width() + padding_right; }
+        CSSPixels padding_box_height() const { return padding_top + content_height() + padding_bottom; }
+
         Optional<LineBoxFragmentCoordinate> containing_line_box_fragment;
 
-        void add_floating_descendant(Box const& box) { m_floating_descendants.set(&box); }
-        auto const& floating_descendants() const { return m_floating_descendants; }
+        void set_inline_end_static_position_rect(StaticPositionRect const& static_position_rect) { ensure_rare_data().inline_end_static_position_rect = static_position_rect; }
+        Optional<StaticPositionRect> const& inline_end_static_position_rect() const
+        {
+            static Optional<StaticPositionRect> const empty;
+            return m_rare ? m_rare->inline_end_static_position_rect : empty;
+        }
 
-        void set_override_borders_data(Painting::PaintableBox::BordersDataWithElementKind const& override_borders_data) { m_override_borders_data = override_borders_data; }
-        auto const& override_borders_data() const { return m_override_borders_data; }
+        void add_floating_descendant(Box const& box) { ensure_rare_data().floating_descendants.set(&box); }
+        HashTable<Box const*> const& floating_descendants() const
+        {
+            static auto const& empty = *new HashTable<Box const*>;
+            return m_rare ? m_rare->floating_descendants : empty;
+        }
 
-        void set_table_cell_coordinates(Painting::PaintableBox::TableCellCoordinates const& table_cell_coordinates) { m_table_cell_coordinates = table_cell_coordinates; }
-        auto const& table_cell_coordinates() const { return m_table_cell_coordinates; }
+        void set_override_borders_data(Painting::PaintableBox::BordersDataWithElementKind const& override_borders_data) { ensure_rare_data().override_borders_data = override_borders_data; }
+        Optional<Painting::PaintableBox::BordersDataWithElementKind> const& override_borders_data() const
+        {
+            static Optional<Painting::PaintableBox::BordersDataWithElementKind> const empty;
+            return m_rare ? m_rare->override_borders_data : empty;
+        }
 
-        void set_computed_svg_path(Gfx::Path const& svg_path) { m_computed_svg_path = svg_path; }
-        auto& computed_svg_path() { return m_computed_svg_path; }
+        void set_table_cell_coordinates(Painting::PaintableBox::TableCellCoordinates const& table_cell_coordinates) { ensure_rare_data().table_cell_coordinates = table_cell_coordinates; }
+        Optional<Painting::PaintableBox::TableCellCoordinates> const& table_cell_coordinates() const
+        {
+            static Optional<Painting::PaintableBox::TableCellCoordinates> const empty;
+            return m_rare ? m_rare->table_cell_coordinates : empty;
+        }
 
-        void set_computed_svg_transforms(Painting::SVGGraphicsPaintable::ComputedTransforms const& computed_transforms) { m_computed_svg_transforms = computed_transforms; }
-        auto const& computed_svg_transforms() const { return m_computed_svg_transforms; }
+        void set_computed_svg_path(Gfx::Path const& svg_path) { ensure_rare_data().computed_svg_path = svg_path; }
+        Gfx::Path* computed_svg_path()
+        {
+            if (!m_rare || !m_rare->computed_svg_path.has_value())
+                return nullptr;
+            return &*m_rare->computed_svg_path;
+        }
 
-        void set_grid_template_columns(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_columns) { m_grid_template_columns = move(used_values_for_grid_template_columns); }
-        auto const& grid_template_columns() const { return m_grid_template_columns; }
+        void set_computed_svg_transforms(Painting::SVGGraphicsPaintable::ComputedTransforms const& computed_transforms) { ensure_rare_data().computed_svg_transforms = computed_transforms; }
+        Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> const& computed_svg_transforms() const
+        {
+            static Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> const empty;
+            return m_rare ? m_rare->computed_svg_transforms : empty;
+        }
 
-        void set_grid_template_rows(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_rows) { m_grid_template_rows = move(used_values_for_grid_template_rows); }
-        auto const& grid_template_rows() const { return m_grid_template_rows; }
+        void set_grid_layout_data(OwnPtr<GridLayoutData> grid_layout_data) { ensure_rare_data().grid_layout_data = move(grid_layout_data); }
+        GridLayoutData const* grid_layout_data() const
+        {
+            return m_rare ? m_rare->grid_layout_data.ptr() : nullptr;
+        }
+        OwnPtr<GridLayoutData> take_grid_layout_data()
+        {
+            if (!m_rare)
+                return {};
+            return move(m_rare->grid_layout_data);
+        }
 
-        void set_static_position_rect(StaticPositionRect const& static_position_rect) { m_static_position_rect = static_position_rect; }
+        void set_grid_template_columns(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_columns) { ensure_rare_data().grid_template_columns = move(used_values_for_grid_template_columns); }
+        RefPtr<CSS::GridTrackSizeListStyleValue const> const& grid_template_columns() const
+        {
+            static auto const& empty = *new RefPtr<CSS::GridTrackSizeListStyleValue const>;
+            return m_rare ? m_rare->grid_template_columns : empty;
+        }
+
+        void set_grid_template_rows(RefPtr<CSS::GridTrackSizeListStyleValue const> used_values_for_grid_template_rows) { ensure_rare_data().grid_template_rows = move(used_values_for_grid_template_rows); }
+        RefPtr<CSS::GridTrackSizeListStyleValue const> const& grid_template_rows() const
+        {
+            static auto const& empty = *new RefPtr<CSS::GridTrackSizeListStyleValue const>;
+            return m_rare ? m_rare->grid_template_rows : empty;
+        }
+
+        void set_flex_layout_data(OwnPtr<FlexLayoutData> flex_layout_data) { ensure_rare_data().flex_layout_data = move(flex_layout_data); }
+        FlexLayoutData const* flex_layout_data() const
+        {
+            return m_rare ? m_rare->flex_layout_data.ptr() : nullptr;
+        }
+        OwnPtr<FlexLayoutData> take_flex_layout_data()
+        {
+            if (!m_rare)
+                return {};
+            return move(m_rare->flex_layout_data);
+        }
+
+        void set_grid_area_size(CSSPixelSize grid_area_size) { ensure_rare_data().grid_area_size = grid_area_size; }
+        Optional<CSSPixelSize> const& grid_area_size() const
+        {
+            static Optional<CSSPixelSize> const empty;
+            return m_rare ? m_rare->grid_area_size : empty;
+        }
+
+        void set_static_position_rect(StaticPositionRect const& static_position_rect) { ensure_rare_data().static_position_rect = static_position_rect; }
         CSSPixelPoint static_position() const
         {
-            if (!m_static_position_rect.has_value())
+            if (!m_rare || !m_rare->static_position_rect.has_value())
                 return {};
-            return m_static_position_rect->aligned_position_for_box_with_size({ margin_box_width(), margin_box_height() });
+            return m_rare->static_position_rect->aligned_position_for_box_with_size({ margin_box_width(), margin_box_height() });
         }
 
     private:
+        friend struct LayoutState;
+
         AvailableSize available_width_inside() const;
         AvailableSize available_height_inside() const;
 
-        bool use_collapsing_borders_model() const { return m_override_borders_data.has_value(); }
+        bool use_collapsing_borders_model() const { return m_rare && m_rare->override_borders_data.has_value(); }
         // Implement the collapsing border model https://www.w3.org/TR/CSS22/tables.html#collapsing-borders.
         CSSPixels border_left_collapsed() const { return use_collapsing_borders_model() ? round(border_left / 2) : border_left; }
         CSSPixels border_right_collapsed() const { return use_collapsing_borders_model() ? round(border_right / 2) : border_right; }
         CSSPixels border_top_collapsed() const { return use_collapsing_borders_model() ? round(border_top / 2) : border_top; }
         CSSPixels border_bottom_collapsed() const { return use_collapsing_borders_model() ? round(border_bottom / 2) : border_bottom; }
 
-        GC::Ptr<Layout::NodeWithStyle const> m_node { nullptr };
+        struct RareData {
+            AK_ALLOC_WITH_KMALLOC_PARTITION(HeapPartition::Layout);
+
+            RareData() = default;
+            RareData(RareData const& other)
+                : floating_descendants(other.floating_descendants)
+                , table_cell_coordinates(other.table_cell_coordinates)
+                , computed_svg_path(other.computed_svg_path)
+                , grid_template_columns(other.grid_template_columns)
+                , grid_template_rows(other.grid_template_rows)
+                , grid_area_size(other.grid_area_size)
+                , override_borders_data(other.override_borders_data)
+                , computed_svg_transforms(other.computed_svg_transforms)
+                , static_position_rect(other.static_position_rect)
+            {
+                if (other.grid_layout_data)
+                    grid_layout_data = make<GridLayoutData>(*other.grid_layout_data);
+                if (other.flex_layout_data)
+                    flex_layout_data = make<FlexLayoutData>(*other.flex_layout_data);
+            }
+
+            HashTable<Box const*> floating_descendants;
+            Optional<Painting::PaintableBox::TableCellCoordinates> table_cell_coordinates;
+            Optional<Gfx::Path> computed_svg_path;
+            OwnPtr<GridLayoutData> grid_layout_data;
+            OwnPtr<FlexLayoutData> flex_layout_data;
+            RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_columns;
+            RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_rows;
+            Optional<CSSPixelSize> grid_area_size;
+            Optional<Painting::PaintableBox::BordersDataWithElementKind> override_borders_data;
+            Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> computed_svg_transforms;
+            Optional<StaticPositionRect> static_position_rect;
+            Optional<StaticPositionRect> inline_end_static_position_rect;
+        };
+
+        RareData& ensure_rare_data()
+        {
+            if (!m_rare)
+                m_rare = make<RareData>();
+            return *m_rare;
+        }
+
+        Layout::NodeWithStyle const* m_node { nullptr };
         UsedValues const* m_containing_block_used_values { nullptr };
+        Optional<CSSPixelPoint> m_cumulative_offset;
 
         CSSPixels m_content_width { 0 };
         CSSPixels m_content_height { 0 };
@@ -182,32 +400,38 @@ struct LayoutState {
         bool m_has_definite_width { false };
         bool m_has_definite_height { false };
 
-        HashTable<GC::Ptr<Box const>> m_floating_descendants;
-
-        Optional<Painting::PaintableBox::BordersDataWithElementKind> m_override_borders_data;
-        Optional<Painting::PaintableBox::TableCellCoordinates> m_table_cell_coordinates;
-
-        Optional<Gfx::Path> m_computed_svg_path;
-        Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> m_computed_svg_transforms;
-
-        RefPtr<CSS::GridTrackSizeListStyleValue const> m_grid_template_columns;
-        RefPtr<CSS::GridTrackSizeListStyleValue const> m_grid_template_rows;
-
-        Optional<StaticPositionRect> m_static_position_rect;
+        OwnPtr<RareData> m_rare;
     };
 
+    LayoutState() = default;
+    explicit LayoutState(NodeWithStyle const& subtree_root);
     ~LayoutState();
 
     // Commits the used values produced by layout and builds a paintable tree.
     void commit(Box& root);
 
+    void ensure_capacity(u32 node_count);
+
+    void set_should_collect_devtools_layout_data(bool should_collect) { m_should_collect_devtools_layout_data = should_collect; }
+    bool should_collect_devtools_layout_data() const { return m_should_collect_devtools_layout_data; }
+
     UsedValues& get_mutable(NodeWithStyle const&);
     UsedValues const& get(NodeWithStyle const&) const;
 
-    OrderedHashMap<GC::Ref<Layout::Node const>, NonnullOwnPtr<UsedValues>> used_values_per_layout_node;
+    UsedValues& populate_from_paintable(NodeWithStyle const&, Painting::PaintableBox const&);
+    UsedValues& populate_node_from(LayoutState const& source, NodeWithStyle const& node);
+
+    UsedValues const* try_get(NodeWithStyle const&) const;
+    UsedValues* try_get_mutable(NodeWithStyle const&);
+    UsedValues const* try_get(Node const&) const;
 
 private:
+    UsedValues& ensure_used_values_for(NodeWithStyle const&);
     void resolve_relative_positions();
+
+    PagedStore<UsedValues> m_used_values_store;
+    Layout::NodeWithStyle const* m_subtree_root { nullptr };
+    bool m_should_collect_devtools_layout_data { false };
 };
 
 inline CSSPixels clamp_to_max_dimension_value(CSSPixels value)

@@ -1,9 +1,9 @@
 Harness status: OK
 
-Found 279 tests
+Found 305 tests
 
-274 Pass
-5 Fail
+301 Pass
+4 Fail
 Pass	accent-color
 Pass	border-collapse
 Pass	border-spacing
@@ -15,6 +15,7 @@ Pass	color-interpolation
 Pass	color-scheme
 Pass	cursor
 Pass	direction
+Pass	dominant-baseline
 Pass	empty-cells
 Pass	fill
 Pass	fill-opacity
@@ -23,6 +24,7 @@ Pass	font-family
 Pass	font-feature-settings
 Pass	font-kerning
 Pass	font-language-override
+Pass	font-optical-sizing
 Pass	font-size
 Pass	font-style
 Pass	font-variant-alternates
@@ -62,6 +64,7 @@ Pass	tab-size
 Pass	text-align
 Pass	text-anchor
 Pass	text-decoration-line
+Pass	text-decoration-skip-ink
 Pass	text-indent
 Pass	text-justify
 Pass	text-rendering
@@ -149,6 +152,7 @@ Pass	column-gap
 Pass	column-span
 Pass	column-width
 Pass	contain
+Pass	container-name
 Pass	container-type
 Pass	content
 Pass	content-visibility
@@ -158,7 +162,7 @@ Pass	counter-set
 Pass	cx
 Pass	cy
 Pass	display
-Fail	filter
+Pass	filter
 Pass	flex-basis
 Pass	flex-direction
 Pass	flex-grow
@@ -222,6 +226,10 @@ Pass	outline-offset
 Pass	outline-style
 Pass	outline-width
 Pass	overflow-block
+Pass	overflow-clip-margin-bottom
+Pass	overflow-clip-margin-left
+Pass	overflow-clip-margin-right
+Pass	overflow-clip-margin-top
 Pass	overflow-inline
 Pass	overflow-x
 Pass	overflow-y
@@ -244,6 +252,23 @@ Pass	row-gap
 Pass	rx
 Pass	ry
 Pass	scale
+Pass	scroll-behavior
+Pass	scroll-margin-block-end
+Pass	scroll-margin-block-start
+Pass	scroll-margin-bottom
+Pass	scroll-margin-inline-end
+Pass	scroll-margin-inline-start
+Pass	scroll-margin-left
+Pass	scroll-margin-right
+Pass	scroll-margin-top
+Pass	scroll-padding-block-end
+Pass	scroll-padding-block-start
+Pass	scroll-padding-bottom
+Pass	scroll-padding-inline-end
+Pass	scroll-padding-inline-start
+Pass	scroll-padding-left
+Pass	scroll-padding-right
+Pass	scroll-padding-top
 Pass	scroll-timeline-axis
 Pass	scroll-timeline-name
 Pass	scrollbar-gutter
@@ -258,6 +283,7 @@ Pass	text-decoration-color
 Pass	text-decoration-style
 Pass	text-decoration-thickness
 Pass	text-overflow
+Pass	timeline-scope
 Pass	top
 Pass	touch-action
 Pass	transform

@@ -4,41 +4,77 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/GraphemeEdgeTracker.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
+#include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/TextPaintable.h>
 
 namespace Web::Painting {
 
-PaintableFragment::PaintableFragment(Layout::LineBoxFragment const& fragment)
+template<typename Callback>
+static void for_each_cluster_in_glyph_run(Gfx::GlyphRun const& glyph_run, size_t fragment_length_in_code_units, Callback&& callback)
+{
+    size_t cursor = 0;
+    for (auto const& glyph : glyph_run.glyphs()) {
+        if (glyph.glyph_width == 0)
+            continue;
+
+        auto cluster_start = cursor;
+        auto cluster_end = min(cursor + glyph.length_in_code_units, fragment_length_in_code_units);
+        cursor = cluster_end;
+
+        if (cluster_end <= cluster_start)
+            continue;
+
+        if (callback(cluster_start, cluster_end, glyph.glyph_width) == IterationDecision::Break)
+            break;
+    }
+}
+
+PaintableFragment::PaintableFragment(Layout::LineBoxFragment const& fragment, LineBoxData line_box_data)
     : m_layout_node(fragment.layout_node())
     , m_offset(fragment.offset())
     , m_size(fragment.size())
-    , m_baseline(fragment.baseline())
+    , m_line_box_data(line_box_data)
     , m_start_offset(fragment.start())
     , m_length_in_code_units(fragment.length_in_code_units())
     , m_glyph_run(fragment.glyph_run())
+    , m_baseline(fragment.baseline())
     , m_writing_mode(fragment.writing_mode())
+    , m_has_trailing_whitespace(fragment.has_trailing_whitespace())
 {
+    if (auto const* text_node = as_if<Layout::TextNode>(layout_node()))
+        m_dom_start_offset_in_node = text_node->dom_start_offset() + m_start_offset;
+    else
+        m_dom_start_offset_in_node = m_start_offset;
 }
 
 CSSPixelRect const PaintableFragment::absolute_rect() const
 {
-    CSSPixelRect rect { {}, size() };
-    if (auto const* containing_block = paintable().containing_block())
-        rect.set_location(containing_block->absolute_position());
-    rect.translate_by(offset());
+    CSSPixelRect rect { offset(), size() };
+    if (auto containing_block = paintable().containing_block())
+        rect.translate_by(containing_block->absolute_position());
+    return rect;
+}
+
+CSSPixelRect const PaintableFragment::absolute_line_box_rect() const
+{
+    auto rect = m_line_box_data.rect;
+    if (auto containing_block = paintable().containing_block())
+        rect.translate_by(containing_block->absolute_position());
     return rect;
 }
 
 size_t PaintableFragment::index_in_node_for_point(CSSPixelPoint position) const
 {
-    if (!is<TextPaintable>(paintable()))
+    auto const* text_paintable = as_if<TextPaintable>(paintable());
+    if (!text_paintable)
         return 0;
 
     auto relative_inline_offset = [&] {
@@ -55,106 +91,149 @@ size_t PaintableFragment::index_in_node_for_point(CSSPixelPoint position) const
 
     GraphemeEdgeTracker tracker { relative_inline_offset };
 
-    for (auto const& glyph : m_glyph_run->glyphs()) {
-        if (tracker.update(glyph.length_in_code_units, glyph.glyph_width) == IterationDecision::Break)
-            break;
+    if (m_glyph_run) {
+        auto& segmenter = text_paintable->layout_node().grapheme_segmenter();
+
+        // A single glyph can cover several code units / graphemes. In the case of ligatures, we want clicks inside to
+        // snap to the closest grapheme boundary inside it, not jump to either end. To achieve this we walk
+        // per-grapheme rather than per-glyph, splitting each glyph's advance proportionally across the graphemes that
+        // lie inside its cluster.
+        for_each_cluster_in_glyph_run(*m_glyph_run, m_length_in_code_units, [&](size_t cluster_start, size_t cluster_end, float cluster_width) {
+            auto per_unit_advance = cluster_width / static_cast<float>(cluster_end - cluster_start);
+
+            auto grapheme_start = m_start_offset + cluster_start;
+            auto cluster_absolute_end = m_start_offset + cluster_end;
+            while (grapheme_start < cluster_absolute_end) {
+                auto grapheme_end = min(segmenter.next_boundary(grapheme_start).value_or(cluster_absolute_end), cluster_absolute_end);
+                if (grapheme_end <= grapheme_start)
+                    break;
+
+                auto grapheme_units = grapheme_end - grapheme_start;
+                auto grapheme_width = per_unit_advance * static_cast<float>(grapheme_units);
+                if (tracker.update(grapheme_units, grapheme_width) == IterationDecision::Break)
+                    return IterationDecision::Break;
+
+                grapheme_start = grapheme_end;
+            }
+
+            return IterationDecision::Continue;
+        });
     }
 
-    return m_start_offset + tracker.resolve();
+    return dom_start_offset_in_node() + tracker.resolve();
+}
+
+Optional<PaintableFragment::SelectionOffsets> PaintableFragment::compute_selection_offsets(Paintable::SelectionState selection_state, size_t start_offset_in_code_units, size_t end_offset_in_code_units) const
+{
+    auto const dom_start = dom_start_offset_in_node();
+    auto const dom_end = dom_start + m_length_in_code_units;
+
+    switch (selection_state) {
+    case Paintable::SelectionState::None:
+        return {};
+    case Paintable::SelectionState::Full:
+        return SelectionOffsets { 0, m_length_in_code_units, true };
+    case Paintable::SelectionState::StartAndEnd:
+        if (dom_start > end_offset_in_code_units || dom_end < start_offset_in_code_units)
+            return {};
+        return SelectionOffsets {
+            start_offset_in_code_units - min(start_offset_in_code_units, dom_start),
+            min(end_offset_in_code_units - dom_start, m_length_in_code_units),
+            end_offset_in_code_units >= dom_end,
+        };
+    case Paintable::SelectionState::Start:
+        if (dom_end < start_offset_in_code_units)
+            return {};
+        return SelectionOffsets {
+            start_offset_in_code_units - min(start_offset_in_code_units, dom_start),
+            m_length_in_code_units,
+            true,
+        };
+    case Paintable::SelectionState::End:
+        if (dom_start > end_offset_in_code_units)
+            return {};
+        return SelectionOffsets {
+            0,
+            min(end_offset_in_code_units - dom_start, m_length_in_code_units),
+            end_offset_in_code_units >= dom_end,
+        };
+    }
+    VERIFY_NOT_REACHED();
 }
 
 CSSPixelRect PaintableFragment::range_rect(Paintable::SelectionState selection_state, size_t start_offset_in_code_units, size_t end_offset_in_code_units) const
 {
-    if (selection_state == Paintable::SelectionState::Full)
-        return absolute_rect();
+    auto offsets = compute_selection_offsets(selection_state, start_offset_in_code_units, end_offset_in_code_units);
+    if (!offsets.has_value())
+        return {};
 
-    auto const start_index = m_start_offset;
-    auto const end_index = m_start_offset + m_length_in_code_units;
-
+    auto rect = absolute_rect();
     auto const& font = glyph_run() ? glyph_run()->font() : layout_node().first_available_font();
-    auto text = this->text();
 
-    if (first_is_one_of(selection_state, Paintable::SelectionState::StartAndEnd, Paintable::SelectionState::None)) {
-        // we are in the start/end node (both the same)
-        if (start_index > end_offset_in_code_units)
-            return {};
-        if (end_index < start_offset_in_code_units)
-            return {};
+    CSSPixels pixel_offset;
+    CSSPixels pixel_width;
 
-        auto selection_start_in_this_fragment = max(0, start_offset_in_code_units - m_start_offset);
-        auto selection_end_in_this_fragment = min(m_length_in_code_units, end_offset_in_code_units - m_start_offset);
-        auto pixel_distance_to_first_selected_character = CSSPixels::nearest_value_for(font.width(text.substring_view(0, selection_start_in_this_fragment)));
-        auto pixel_width_of_selection = CSSPixels::nearest_value_for(font.width(text.substring_view(selection_start_in_this_fragment, selection_end_in_this_fragment - selection_start_in_this_fragment))) + 1;
+    // When entire fragment is selected, use the rect's existing dimensions rather than recalculating from text.
+    if (offsets->start == 0 && offsets->end == m_length_in_code_units && m_length_in_code_units > 0) {
+        pixel_offset = 0;
+        pixel_width = rect.primary_size_for_orientation(orientation());
+    } else {
+        float offset_accumulator = 0.f;
+        float width_accumulator = 0.f;
 
-        auto rect = absolute_rect();
-        switch (orientation()) {
-        case Gfx::Orientation::Horizontal:
-            rect.set_x(rect.x() + pixel_distance_to_first_selected_character);
-            rect.set_width(pixel_width_of_selection);
-            break;
-        case Gfx::Orientation::Vertical:
-            rect.set_y(rect.y() + pixel_distance_to_first_selected_character);
-            rect.set_height(pixel_width_of_selection);
-            break;
-        default:
-            VERIFY_NOT_REACHED();
+        if (m_glyph_run) {
+            // Walk the glyph run, splitting any cluster that spans multiple code units proportionally between the
+            // pre-selection offset and the in-selection width when the selection range partially overlaps the cluster.
+            // This allows ligatures to be partially selected.
+            for_each_cluster_in_glyph_run(*m_glyph_run, m_length_in_code_units, [&](size_t cluster_start, size_t cluster_end, float cluster_width) {
+                if (cluster_end <= offsets->start) {
+                    offset_accumulator += cluster_width;
+                    return IterationDecision::Continue;
+                }
+                if (cluster_start >= offsets->end)
+                    return IterationDecision::Continue;
+
+                auto per_unit_advance = cluster_width / static_cast<float>(cluster_end - cluster_start);
+
+                if (cluster_start < offsets->start)
+                    offset_accumulator += per_unit_advance * static_cast<float>(offsets->start - cluster_start);
+
+                auto in_sel_start = max(cluster_start, offsets->start);
+                auto in_sel_end = min(cluster_end, offsets->end);
+                width_accumulator += per_unit_advance * static_cast<float>(in_sel_end - in_sel_start);
+
+                return IterationDecision::Continue;
+            });
         }
 
-        return rect;
+        pixel_offset = CSSPixels { offset_accumulator };
+        pixel_width = CSSPixels { width_accumulator };
     }
-    if (selection_state == Paintable::SelectionState::Start) {
-        // we are in the start node
-        if (end_index < start_offset_in_code_units)
-            return {};
 
-        auto selection_start_in_this_fragment = max(0, start_offset_in_code_units - m_start_offset);
-        auto selection_end_in_this_fragment = m_length_in_code_units;
-        auto pixel_distance_to_first_selected_character = CSSPixels::nearest_value_for(font.width(text.substring_view(0, selection_start_in_this_fragment)));
-        auto pixel_width_of_selection = CSSPixels::nearest_value_for(font.width(text.substring_view(selection_start_in_this_fragment, selection_end_in_this_fragment - selection_start_in_this_fragment))) + 1;
+    // When start equals end, this is a cursor position.
+    if (offsets->start == offsets->end)
+        pixel_width = 1;
 
-        auto rect = absolute_rect();
-        switch (orientation()) {
-        case Gfx::Orientation::Horizontal:
-            rect.set_x(rect.x() + pixel_distance_to_first_selected_character);
-            rect.set_width(pixel_width_of_selection);
-            break;
-        case Gfx::Orientation::Vertical:
-            rect.set_y(rect.y() + pixel_distance_to_first_selected_character);
-            rect.set_height(pixel_width_of_selection);
-            break;
-        default:
-            VERIFY_NOT_REACHED();
-        }
+    // Include an additional space at the end if we remembered that this fragment contained trailing whitespace. This
+    // shows the user that at least one whitespace character was present when selecting text, even though we don't store
+    // that whitespace in the glyph run or text fragment.
+    if (offsets->start != offsets->end && m_has_trailing_whitespace && offsets->include_trailing_whitespace)
+        pixel_width += CSSPixels { font.glyph_width(' ') };
 
-        return rect;
+    rect.translate_primary_offset_for_orientation(orientation(), pixel_offset);
+    rect.set_primary_size_for_orientation(orientation(), pixel_width);
+
+    // Inflate so the rect covers glyph ascenders and descenders that may extend beyond the line box.
+    auto const& font_metrics = font.pixel_metrics();
+    if (font_metrics.ascent > 0.f || font_metrics.descent > 0.f) {
+        CSSPixels ascent { font_metrics.ascent };
+        CSSPixels descent { font_metrics.descent };
+        auto overflow_top = max<CSSPixels>(0, ascent - m_baseline);
+        auto overflow_bottom = max<CSSPixels>(0, descent - rect.secondary_size_for_orientation(orientation()) + m_baseline);
+        rect.inflate_secondary_for_orientation(orientation(), overflow_top, overflow_bottom);
     }
-    if (selection_state == Paintable::SelectionState::End) {
-        // we are in the end node
-        if (start_index > end_offset_in_code_units)
-            return {};
 
-        auto selection_start_in_this_fragment = 0;
-        auto selection_end_in_this_fragment = min<int>(end_offset_in_code_units - m_start_offset, m_length_in_code_units);
-        auto pixel_distance_to_first_selected_character = CSSPixels::nearest_value_for(font.width(text.substring_view(0, selection_start_in_this_fragment)));
-        auto pixel_width_of_selection = CSSPixels::nearest_value_for(font.width(text.substring_view(selection_start_in_this_fragment, selection_end_in_this_fragment - selection_start_in_this_fragment))) + 1;
-
-        auto rect = absolute_rect();
-        switch (orientation()) {
-        case Gfx::Orientation::Horizontal:
-            rect.set_x(rect.x() + pixel_distance_to_first_selected_character);
-            rect.set_width(pixel_width_of_selection);
-            break;
-        case Gfx::Orientation::Vertical:
-            rect.set_y(rect.y() + pixel_distance_to_first_selected_character);
-            rect.set_height(pixel_width_of_selection);
-            break;
-        default:
-            VERIFY_NOT_REACHED();
-        }
-
-        return rect;
-    }
-    return {};
+    return rect;
 }
 
 Gfx::Orientation PaintableFragment::orientation() const
@@ -172,25 +251,50 @@ Gfx::Orientation PaintableFragment::orientation() const
     }
 }
 
-CSSPixelRect PaintableFragment::selection_rect() const
+Optional<PaintableFragment::SelectionOffsets> PaintableFragment::selection_range_for_text_control() const
 {
-    auto const selection_state = paintable().selection_state();
+    // For focused text controls (input/textarea), determine selection from the control's internal state.
+    auto const* text_control = as_if<HTML::FormAssociatedTextControlElement>(paintable().document().focused_area().ptr());
+    if (!text_control)
+        return {};
+    if (paintable().dom_node() != text_control->form_associated_element_to_text_node())
+        return {};
+
+    auto selection_start = text_control->selection_start();
+    auto selection_end = text_control->selection_end();
+    if (selection_start == selection_end)
+        return {};
+
+    return SelectionOffsets { selection_start, selection_end };
+}
+
+Optional<PaintableFragment::SelectionOffsets> PaintableFragment::selection_offsets() const
+{
+    if (auto offsets = selection_range_for_text_control(); offsets.has_value())
+        return compute_selection_offsets(Paintable::SelectionState::StartAndEnd, offsets->start, offsets->end);
+
+    auto selection_state = paintable().selection_state();
     if (selection_state == Paintable::SelectionState::None)
         return {};
 
-    if (auto const* focused_area = as_if<HTML::FormAssociatedTextControlElement>(paintable().document().focused_area().ptr())) {
-        HTML::FormAssociatedTextControlElement const* text_control_element = nullptr;
-        if (auto const* input_element = as_if<HTML::HTMLInputElement>(*focused_area)) {
-            text_control_element = input_element;
-        } else if (auto const* text_area_element = as_if<HTML::HTMLTextAreaElement>(*focused_area)) {
-            text_control_element = text_area_element;
-        } else {
-            VERIFY_NOT_REACHED();
-        }
-        auto selection_start = text_control_element->selection_start();
-        auto selection_end = text_control_element->selection_end();
-        return range_rect(selection_state, selection_start, selection_end);
-    }
+    auto selection = paintable().document().get_selection();
+    if (!selection)
+        return {};
+    auto range = selection->range();
+    if (!range)
+        return {};
+
+    return compute_selection_offsets(selection_state, range->start_offset(), range->end_offset());
+}
+
+CSSPixelRect PaintableFragment::selection_rect() const
+{
+    if (auto offsets = selection_range_for_text_control(); offsets.has_value())
+        return range_rect(Paintable::SelectionState::StartAndEnd, offsets->start, offsets->end);
+
+    auto const selection_state = paintable().selection_state();
+    if (selection_state == Paintable::SelectionState::None)
+        return {};
 
     auto selection = paintable().document().get_selection();
     if (!selection)
@@ -204,9 +308,10 @@ CSSPixelRect PaintableFragment::selection_rect() const
 
 Utf16View PaintableFragment::text() const
 {
-    if (!is<TextPaintable>(paintable()))
+    auto const* text_paintable = as_if<TextPaintable>(paintable());
+    if (!text_paintable)
         return {};
-    return as<TextPaintable>(paintable()).layout_node().text_for_rendering().substring_view(m_start_offset, m_length_in_code_units);
+    return text_paintable->layout_node().text_for_rendering().substring_view(m_start_offset, m_length_in_code_units);
 }
 
 }

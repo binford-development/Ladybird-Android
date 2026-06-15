@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2025-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,16 +7,18 @@
 #pragma once
 
 #include <LibGC/Cell.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/PseudoElement.h>
-#include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::DOM {
 
 // Either an Element or a PseudoElement
+// FIXME: Figure out const-correctness for the Element.
 class WEB_API AbstractElement {
 public:
     AbstractElement(GC::Ref<Element>, Optional<CSS::PseudoElement> = {});
+    AbstractElement(Element const&, Optional<CSS::PseudoElement> = {});
 
     Document& document() const;
 
@@ -24,8 +26,11 @@ public:
     Element const& element() const { return m_element; }
     Optional<CSS::PseudoElement> pseudo_element() const { return m_pseudo_element; }
 
-    GC::Ptr<Layout::NodeWithStyle> layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> layout_node() const { return const_cast<AbstractElement*>(this)->layout_node(); }
+    Layout::NodeWithStyle* layout_node();
+    Layout::NodeWithStyle const* layout_node() const { return const_cast<AbstractElement*>(this)->layout_node(); }
+
+    Layout::NodeWithStyle* unsafe_layout_node();
+    Layout::NodeWithStyle const* unsafe_layout_node() const { return const_cast<AbstractElement*>(this)->unsafe_layout_node(); }
 
     struct TreeCountingFunctionResolutionContext {
         size_t sibling_count;
@@ -41,21 +46,19 @@ public:
 
     void set_inheritance_override(GC::Ref<Element> element) { m_inheritance_override = element; }
 
-    GC::Ptr<CSS::ComputedProperties const> computed_properties() const;
+    CSS::ComputedProperties const* computed_properties() const;
+    GC::Ptr<CSS::CSSStyleProperties const> inline_style() const;
 
-    void set_custom_properties(OrderedHashMap<FlyString, CSS::StyleProperty>&& custom_properties);
-    [[nodiscard]] OrderedHashMap<FlyString, CSS::StyleProperty> const& custom_properties() const;
-    RefPtr<CSS::StyleValue const> get_custom_property(FlyString const& name) const;
-
-    GC::Ptr<CSS::CascadedProperties> cascaded_properties() const;
-    void set_cascaded_properties(GC::Ptr<CSS::CascadedProperties>);
+    void set_custom_property_data(RefPtr<CSS::CustomPropertyData const>);
+    [[nodiscard]] RefPtr<CSS::CustomPropertyData const> custom_property_data() const;
+    RefPtr<CSS::StyleValue const> get_custom_property(Utf16FlyString const& name) const;
 
     bool has_non_empty_counters_set() const;
     Optional<CSS::CountersSet const&> counters_set() const;
     CSS::CountersSet& ensure_counters_set();
     void set_counters_set(OwnPtr<CSS::CountersSet>&&);
 
-    HashMap<FlyString, GC::Ref<Animations::Animation>>* css_defined_animations() const;
+    HashMap<FlyString, GC::Ref<CSS::CSSAnimation>>* css_defined_animations() const;
     void set_has_css_defined_animations();
 
     void visit(GC::Cell::Visitor& visitor) const;

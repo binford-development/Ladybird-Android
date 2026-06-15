@@ -357,6 +357,27 @@ describe("scope-local eval deoptimization", () => {
         expect(typeof localToFoo).toBe("undefined");
     });
 
+    test("direct eval can delete a function environment var binding", () => {
+        function foo() {
+            eval("var localToFoo = 42; delete localToFoo;");
+            return typeof localToFoo;
+        }
+        expect(foo()).toBe("undefined");
+    });
+
+    test("assignment keeps the resolved binding through direct eval var declarations", () => {
+        function foo() {
+            var x = 0;
+            var innerX = (function () {
+                x = (eval("var x;"), 1);
+                return x;
+            })();
+            return [innerX, x];
+        }
+
+        expect(foo()).toEqual([undefined, 1]);
+    });
+
     test("eval shadowing global does not modify actual global", () => {
         globalThis.testGlobal789 = "original";
         function foo() {
@@ -380,5 +401,66 @@ describe("scope-local eval deoptimization", () => {
         expect(outer()).toBe("local");
         expect(globalThis.sharedName111).toBe("global");
         delete globalThis.sharedName111;
+    });
+
+    test("eval as subexpression of binary operator", () => {
+        function foo(n) {
+            let local = n | 0;
+            let code = "local + 11";
+            return eval(code) | 0;
+        }
+        expect(foo(3)).toBe(14);
+    });
+
+    test("eval as subexpression of ternary operator", () => {
+        function foo(n) {
+            let local = n;
+            return eval("local") ? "truthy" : "falsy";
+        }
+        expect(foo(1)).toBe("truthy");
+        expect(foo(0)).toBe("falsy");
+    });
+
+    test("eval as argument to another function call", () => {
+        function foo(n) {
+            let local = n * 2;
+            return String(eval("local"));
+        }
+        expect(foo(21)).toBe("42");
+    });
+
+    test("eval in comma expression", () => {
+        function foo(n) {
+            let local = n;
+            return (0, eval("local + 1"));
+        }
+        expect(foo(5)).toBe(6);
+    });
+
+    test("eval result used in assignment expression", () => {
+        function foo(n) {
+            let local = n;
+            let result = eval("local") + 100;
+            return result;
+        }
+        expect(foo(23)).toBe(123);
+    });
+
+    test("repeated calls keep eval-created vars separate from cached function bindings", () => {
+        function outer(seed, createEvalVar) {
+            var captured = seed;
+            function readCaptured() {
+                return captured;
+            }
+            if (createEvalVar) {
+                eval("var injected = captured + 100; delete injected;");
+                return readCaptured() + ":" + typeof injected;
+            }
+            return readCaptured() + ":" + typeof injected;
+        }
+
+        expect(outer(1, false)).toBe("1:undefined");
+        expect(outer(2, true)).toBe("2:undefined");
+        expect(outer(3, false)).toBe("3:undefined");
     });
 });

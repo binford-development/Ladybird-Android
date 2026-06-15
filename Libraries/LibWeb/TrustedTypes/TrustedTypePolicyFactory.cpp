@@ -98,7 +98,7 @@ Optional<Utf16String> TrustedTypePolicyFactory::get_property_type(Utf16String co
         TrustedTypeName trusted_type;
     };
 
-    static Vector<TrustedTypesPropertyTypeData> const table {
+    static auto const& table = *new Vector<TrustedTypesPropertyTypeData> {
         { "HTMLIFrameElement"_utf16, "srcdoc"_utf16, TrustedTypeName::TrustedHTML },
         { "HTMLScriptElement"_utf16, "innerText"_utf16, TrustedTypeName::TrustedScript },
         { "HTMLScriptElement"_utf16, "src"_utf16, TrustedTypeName::TrustedScriptURL },
@@ -142,7 +142,7 @@ void TrustedTypePolicyFactory::visit_edges(Visitor& visitor)
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-createpolicy
-WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_policy(Utf16String const& policy_name, TrustedTypePolicyOptions const& policy_options)
+WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_policy(Utf16String const& policy_name, Bindings::TrustedTypePolicyOptions const& policy_options)
 {
     // 1. Returns the result of executing a Create a Trusted Type Policy algorithm, with the following arguments:
     //      factory: this value
@@ -156,21 +156,21 @@ WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create
 bool TrustedTypePolicyFactory::is_html(JS::Value value)
 {
     // 1. Returns true if value is an instance of TrustedHTML and has an associated data value set, false otherwise.
-    return value.is_object() && is<TrustedHTML>(value.as_object());
+    return value.is<TrustedHTML>();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-isscript
 bool TrustedTypePolicyFactory::is_script(JS::Value value)
 {
     // 1. Returns true if value is an instance of TrustedScript and has an associated data value set, false otherwise.
-    return value.is_object() && is<TrustedScript>(value.as_object());
+    return value.is<TrustedScript>();
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#dom-trustedtypepolicyfactory-isscripturl
 bool TrustedTypePolicyFactory::is_script_url(JS::Value value)
 {
     // 1. Returns true if value is an instance of TrustedScriptURL and has an associated data value set, false otherwise.
-    return value.is_object() && is<TrustedScriptURL>(value.as_object());
+    return value.is<TrustedScriptURL>();
 }
 
 GC::Ref<TrustedHTML const> TrustedTypePolicyFactory::empty_html()
@@ -194,7 +194,7 @@ GC::Ref<TrustedScript const> TrustedTypePolicyFactory::empty_script()
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#create-trusted-type-policy-algorithm
-WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_a_trusted_type_policy(Utf16String const& policy_name, TrustedTypePolicyOptions const& options, JS::Object& global)
+WebIDL::ExceptionOr<GC::Ref<TrustedTypePolicy>> TrustedTypePolicyFactory::create_a_trusted_type_policy(Utf16String const& policy_name, Bindings::TrustedTypePolicyOptions const& options, JS::Object& global)
 {
     auto& realm = this->realm();
 
@@ -318,7 +318,7 @@ Optional<TrustedTypeData> get_trusted_type_data_for_attribute(ElementInterface c
 #undef __ENUMERATE
     }
 
-    static Vector<TrustedTypeData> const table {
+    static auto const& table = *new Vector<TrustedTypeData> {
         { "HTMLIFrameElement"_utf16, {}, HTML::AttributeNames::srcdoc, TrustedTypeName::TrustedHTML, InjectionSink::HTMLIFrameElement_srcdoc },
         { "HTMLScriptElement"_utf16, {}, HTML::AttributeNames::src, TrustedTypeName::TrustedScriptURL, InjectionSink::HTMLScriptElement_src },
         { "SVGScriptElement"_utf16, {}, HTML::AttributeNames::href, TrustedTypeName::TrustedScriptURL, InjectionSink::SVGScriptElement_href },

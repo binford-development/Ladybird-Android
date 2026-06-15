@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2023-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,11 +22,16 @@
 - (void)loadURL:(URL::URL const&)url;
 
 - (void)onLoadStart:(URL::URL const&)url isRedirect:(BOOL)isRedirect;
+- (void)onLoadFinish:(URL::URL const&)url;
+- (void)onFaviconChange:(NSImage*)favicon;
 
 - (void)onURLChange:(URL::URL const&)url;
 
-- (void)clearHistory;
+- (void)onEnterFullscreenWindow;
+- (void)onExitFullscreenWindow;
 
+- (void)focusWebViewWhenActivated;
+- (void)focusWebView;
 - (void)focusLocationToolbarItem;
 
 @end

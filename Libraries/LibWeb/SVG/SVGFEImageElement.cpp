@@ -6,8 +6,9 @@
 
 #include "SVGFEImageElement.h"
 #include <LibCore/Timer.h>
-#include <LibGfx/ImmutableBitmap.h>
-#include <LibWeb/Bindings/SVGFEImageElementPrototype.h>
+#include <LibGfx/DecodedImageFrame.h>
+#include <LibWeb/Bindings/SVGFEImageElement.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
@@ -68,8 +69,7 @@ void SVGFEImageElement::process_href(Optional<String> const& href)
     m_resource_request->add_callbacks(
         [this, resource_request = GC::Root { m_resource_request }] {
             set_needs_style_update(true);
-            if (auto layout_node = this->layout_node())
-                layout_node->set_needs_layout_update(DOM::SetNeedsLayoutReason::SVGImageFilterFetch);
+            set_needs_layout_update(DOM::SetNeedsLayoutReason::SVGImageFilterFetch);
         },
         nullptr);
 
@@ -80,21 +80,27 @@ void SVGFEImageElement::process_href(Optional<String> const& href)
     }
 }
 
-RefPtr<Gfx::ImmutableBitmap> SVGFEImageElement::current_image_bitmap(Gfx::IntSize size) const
+GC::Ptr<HTML::DecodedImageData> SVGFEImageElement::image_data() const
 {
     if (!m_resource_request)
         return {};
-    if (auto data = m_resource_request->image_data())
-        return data->bitmap(0, size);
+    return m_resource_request->image_data();
+}
+
+Optional<Gfx::DecodedImageFrame> SVGFEImageElement::current_image_frame(Gfx::IntSize size) const
+{
+    if (auto data = image_data())
+        return data->frame(0, size);
     return {};
 }
 
 Optional<Gfx::IntRect> SVGFEImageElement::content_rect() const
 {
-    auto bitmap = current_image_bitmap();
-    if (!bitmap)
+    auto bitmap = current_image_frame();
+    if (!bitmap.has_value())
         return {};
-    auto layout_node = this->layout_node();
+    // NB: Called during painting.
+    auto layout_node = this->unsafe_layout_node();
     if (!layout_node)
         return {};
     auto width = layout_node->computed_values().width().to_px(*layout_node, 0);

@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
@@ -30,6 +29,8 @@ public:
     ValueComparingNonnullRefPtr<EdgeStyleValue const> with_resolved_keywords() const;
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const& computation_context) const override;
     bool properties_equal(EdgeStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override { return !m_properties.offset || m_properties.offset->is_computationally_independent(); }
 
 private:
     EdgeStyleValue(Optional<PositionEdge> edge, RefPtr<StyleValue const> const& offset)

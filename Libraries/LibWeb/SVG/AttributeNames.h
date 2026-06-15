@@ -87,6 +87,8 @@ namespace Web::SVG::AttributeNames {
     __ENUMERATE_SVG_ATTRIBUTE(rotate, "rotate")                           \
     __ENUMERATE_SVG_ATTRIBUTE(rx, "rx")                                   \
     __ENUMERATE_SVG_ATTRIBUTE(ry, "ry")                                   \
+    __ENUMERATE_SVG_ATTRIBUTE(scale, "scale")                             \
+    __ENUMERATE_SVG_ATTRIBUTE(seed, "seed")                               \
     __ENUMERATE_SVG_ATTRIBUTE(slope, "slope")                             \
     __ENUMERATE_SVG_ATTRIBUTE(specularConstant, "specularConstant")       \
     __ENUMERATE_SVG_ATTRIBUTE(specularExponent, "specularExponent")       \
@@ -120,7 +122,7 @@ namespace Web::SVG::AttributeNames {
     __ENUMERATE_SVG_ATTRIBUTE(yChannelSelector, "yChannelSelector")       \
     __ENUMERATE_SVG_ATTRIBUTE(zoomAndPan, "zoomAndPan")
 
-#define __ENUMERATE_SVG_ATTRIBUTE(name, attribute) extern FlyString name;
+#define __ENUMERATE_SVG_ATTRIBUTE(name, attribute) extern FlyString const& name;
 ENUMERATE_SVG_ATTRIBUTES
 #undef __ENUMERATE_SVG_ATTRIBUTE
 

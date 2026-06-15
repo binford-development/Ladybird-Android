@@ -185,14 +185,14 @@ ThrowCompletionOr<bool> JSONObject::serialize_json_property(VM& vm, StringifySta
             value = TRY(value.to_primitive_string(vm));
         }
         // d. Else if value has a [[BooleanData]] internal slot, then
-        else if (is<BooleanObject>(value_object)) {
+        else if (auto const* boolean = as_if<BooleanObject>(value_object)) {
             // i. Set value to value.[[BooleanData]].
-            value = Value(static_cast<BooleanObject&>(value_object).boolean());
+            value = Value { boolean->boolean() };
         }
         // e. Else if value has a [[BigIntData]] internal slot, then
-        else if (is<BigIntObject>(value_object)) {
+        else if (auto const* bigint = as_if<BigIntObject>(value_object)) {
             // i. Set value to value.[[BigIntData]].
-            value = Value(&static_cast<BigIntObject&>(value_object).bigint());
+            value = Value { &bigint->bigint() };
         }
     }
 
@@ -261,6 +261,9 @@ static void write_indent(StringBuilder& builder, StringView gap, size_t depth)
 // 25.5.2.4 SerializeJSONObject ( state, value ), https://tc39.es/ecma262/#sec-serializejsonobject
 ThrowCompletionOr<void> JSONObject::serialize_json_object(VM& vm, StringifyState& state, Object& object)
 {
+    if (vm.did_reach_stack_space_limit())
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+
     if (state.seen_objects.contains(&object))
         return vm.throw_completion<TypeError>(ErrorType::JsonCircular);
 
@@ -334,6 +337,9 @@ ThrowCompletionOr<void> JSONObject::serialize_json_object(VM& vm, StringifyState
 // 25.5.2.5 SerializeJSONArray ( state, value ), https://tc39.es/ecma262/#sec-serializejsonarray
 ThrowCompletionOr<void> JSONObject::serialize_json_array(VM& vm, StringifyState& state, Object& object)
 {
+    if (vm.did_reach_stack_space_limit())
+        return vm.throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
+
     if (state.seen_objects.contains(&object))
         return vm.throw_completion<TypeError>(ErrorType::JsonCircular);
 
@@ -912,11 +918,8 @@ JS_DEFINE_NATIVE_FUNCTION(JSONObject::raw_json)
 JS_DEFINE_NATIVE_FUNCTION(JSONObject::is_raw_json)
 {
     // 1. If Type(O) is Object and O has an [[IsRawJSON]] internal slot, return true.
-    if (vm.argument(0).is_object() && is<RawJSONObject>(vm.argument(0).as_object()))
-        return Value(true);
-
     // 2. Return false.
-    return Value(false);
+    return vm.argument(0).is<RawJSONObject>();
 }
 
 }

@@ -9,22 +9,30 @@
 
 namespace Media {
 
-class CodedFrame;
-class AudioDataProvider;
 class AudioDecoder;
-class AudioMixingSink;
+class AudioMixer;
+class AudioPlaybackSink;
+class AudioProducer;
 class AudioSink;
+class CodedFrame;
+class ContainerNavigator;
+class DecodedAudioProducer;
+class DecodedVideoProducer;
 class DecoderError;
 class Demuxer;
 class DisplayingVideoSink;
 class FrameQueueItem;
 class IncrementallyPopulatedStream;
+class MediaStream;
+class MediaStreamCursor;
 class MediaTimeProvider;
 class PlaybackManager;
+class ReadonlyBytesCursor;
+class AudioTimeStretchProcessor;
 class Track;
-class VideoDataProvider;
 class VideoDecoder;
 class VideoFrame;
+class VideoProducer;
 class VideoSink;
 
 }

@@ -11,6 +11,7 @@
 *.autosave
 build*/
 Build*/
+target/
 Toolchain/Tarballs
 Toolchain/Build
 Toolchain/Local
@@ -48,6 +49,7 @@ Tests/LibWeb/WPT/metadata
 Tests/LibWeb/WPT/MANIFEST.json
 
 test-dumps
+*.log
 
 # HTTP Test server artifacts from ./Tests/LibWeb/Fixtures/http-test-server.py
 http-test-server.pid.txt

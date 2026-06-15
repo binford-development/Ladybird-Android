@@ -8,6 +8,7 @@
 
 #include <AK/ByteString.h>
 #include <AK/Error.h>
+#include <AK/String.h>
 #include <AK/Vector.h>
 #include <LibWebView/Application.h>
 
@@ -22,7 +23,8 @@ public:
 
     virtual void create_platform_arguments(Core::ArgsParser&) override;
     virtual void create_platform_options(WebView::BrowserOptions&, WebView::RequestServerOptions&, WebView::WebContentOptions&) override;
-    virtual bool should_capture_web_content_output() const override;
+    virtual bool should_capture_web_content_output() const override { return true; }
+
     ErrorOr<void> launch_test_fixtures();
 
     static constexpr u8 VERBOSITY_LEVEL_LOG_TEST_OUTPUT = 1;
@@ -36,17 +38,19 @@ public:
     Vector<ByteString> test_globs;
 
     ByteString python_executable_path;
+    String invocation_command_line;
 
-    bool dump_failed_ref_tests { false };
     bool dump_gc_graph { false };
-
+    bool fail_fast { false };
+    size_t repeat_count { 1 };
     bool test_dry_run { false };
     bool rebaseline { false };
     bool shuffle { false };
-
+    bool run_ui_process_session_history_tests { false };
     int per_test_timeout_in_seconds { 30 };
 
     u8 verbosity { 0 };
+    bool quiet { false };
 };
 
 }

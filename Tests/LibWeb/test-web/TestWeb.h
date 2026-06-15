@@ -14,8 +14,9 @@
 #include <AK/String.h>
 #include <AK/Time.h>
 #include <AK/Vector.h>
-#include <LibCore/Forward.h>
 #include <LibCore/Promise.h>
+#include <LibCore/Timer.h>
+#include <LibGfx/Bitmap.h>
 #include <LibGfx/Forward.h>
 
 namespace TestWeb {
@@ -24,8 +25,26 @@ enum class TestMode {
     Layout,
     Text,
     Ref,
+    Screenshot,
     Crash,
 };
+
+constexpr StringView test_mode_to_string(TestMode mode)
+{
+    switch (mode) {
+    case TestMode::Layout:
+        return "Layout"sv;
+    case TestMode::Text:
+        return "Text"sv;
+    case TestMode::Ref:
+        return "Ref"sv;
+    case TestMode::Screenshot:
+        return "Screenshot"sv;
+    case TestMode::Crash:
+        return "Crash"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
 
 enum class TestResult {
     Pass,
@@ -33,12 +52,33 @@ enum class TestResult {
     Skipped,
     Timeout,
     Crashed,
-    Expanded,
 };
+
+constexpr StringView test_result_to_string(TestResult result)
+{
+    switch (result) {
+    case TestResult::Pass:
+        return "Pass"sv;
+    case TestResult::Fail:
+        return "Fail"sv;
+    case TestResult::Skipped:
+        return "Skipped"sv;
+    case TestResult::Timeout:
+        return "Timeout"sv;
+    case TestResult::Crashed:
+        return "Crashed"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
 
 enum class RefTestExpectationType {
     Match,
     Mismatch,
+};
+
+struct RefTestExpectation {
+    RefTestExpectationType type;
+    URL::URL url;
 };
 
 struct Test {
@@ -53,17 +93,24 @@ struct Test {
     UnixDateTime start_time {};
     UnixDateTime end_time {};
     size_t index { 0 };
+    size_t run_index { 1 };
+    size_t total_runs { 1 };
 
     String text {};
+    bool did_start_test { false };
     bool did_finish_test { false };
     bool did_finish_loading { false };
-    bool did_check_variants { false };
+    bool did_inject_js { false };
 
-    Optional<RefTestExpectationType> ref_test_expectation_type {};
+    Vector<RefTestExpectation> ref_test_expectations {};
+    size_t ref_test_expectation_index { 0 };
     Vector<FuzzyMatch> fuzzy_matches {};
 
     RefPtr<Gfx::Bitmap const> actual_screenshot {};
     RefPtr<Gfx::Bitmap const> expectation_screenshot {};
+
+    u64 diff_pixel_error_count { 0 };
+    u8 diff_maximum_error { 0 };
 
     RefPtr<Core::Timer> timeout_timer {};
 };
@@ -73,10 +120,16 @@ struct TestCompletion {
     TestResult result;
 };
 
-using TestPromise = Core::Promise<TestCompletion>;
+struct ViewDisplayState {
+    pid_t pid { 0 };
+    ByteString test_name;
+    UnixDateTime start_time;
+    bool active { false };
+};
 
-// Deferred warning system - buffers warnings during live display mode
-void add_deferred_warning(ByteString message);
-void print_deferred_warnings();
+Vector<ViewDisplayState>& view_states();
+size_t total_tests();
+
+using TestPromise = Core::Promise<TestCompletion>;
 
 }

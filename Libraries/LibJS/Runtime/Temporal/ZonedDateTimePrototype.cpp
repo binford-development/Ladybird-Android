@@ -590,11 +590,9 @@ JS_DEFINE_NATIVE_FUNCTION(ZonedDateTimePrototype::round)
     // 2. Perform ? RequireInternalSlot(zonedDateTime, [[InitializedTemporalZonedDateTime]]).
     auto zoned_date_time = TRY(typed_this_object(vm));
 
-    // 3. If roundTo is undefined, then
-    if (round_to_value.is_undefined()) {
-        // a. Throw a TypeError exception.
+    // 3. If roundTo is undefined, throw a TypeError exception.
+    if (round_to_value.is_undefined())
         return vm.throw_completion<TypeError>(ErrorType::TemporalMissingOptionsObject);
-    }
 
     GC::Ptr<Object> round_to;
 
@@ -694,14 +692,14 @@ JS_DEFINE_NATIVE_FUNCTION(ZonedDateTimePrototype::round)
         // e. Let endNs be ? GetStartOfDay(timeZone, dateEnd).
         auto end_nanoseconds = TRY(get_start_of_day(vm, time_zone, date_end));
 
-        // f. Assert: thisNs < endNs.
-        VERIFY(this_nanoseconds < end_nanoseconds);
+        // f. Set thisNs to min(thisNs, endNs - 1).
+        auto this_nanoseconds_clamped = min(this_nanoseconds, end_nanoseconds.minus(1_bigint));
 
         // g. Let dayLengthNs be ℝ(endNs - startNs).
         auto day_length_nanoseconds = end_nanoseconds.minus(start_nanoseconds);
 
         // h. Let dayProgressNs be TimeDurationFromEpochNanosecondsDifference(thisNs, startNs).
-        auto day_progress_nanoseconds = time_duration_from_epoch_nanoseconds_difference(this_nanoseconds, start_nanoseconds);
+        auto day_progress_nanoseconds = time_duration_from_epoch_nanoseconds_difference(this_nanoseconds_clamped, start_nanoseconds);
 
         // i. Let roundedDayNs be ! RoundTimeDurationToIncrement(dayProgressNs, dayLengthNs, roundingMode).
         auto rounded_day_nanoseconds = MUST(round_time_duration_to_increment(vm, day_progress_nanoseconds, day_length_nanoseconds.unsigned_value(), rounding_mode));
@@ -794,7 +792,7 @@ JS_DEFINE_NATIVE_FUNCTION(ZonedDateTimePrototype::to_string)
 }
 
 // 6.3.42 Temporal.ZonedDateTime.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.tolocalestring
-// 15.12.8.1 Temporal.ZonedDateTime.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-properties-of-the-temporal-zoneddatetime-prototype-object
+// 15.11.8.1 Temporal.ZonedDateTime.prototype.toLocaleString ( [ locales [ , options ] ] ), https://tc39.es/proposal-temporal/#sup-temporal.zoneddatetime.prototype.tolocalestring
 JS_DEFINE_NATIVE_FUNCTION(ZonedDateTimePrototype::to_locale_string)
 {
     auto& realm = *vm.current_realm();
@@ -809,11 +807,9 @@ JS_DEFINE_NATIVE_FUNCTION(ZonedDateTimePrototype::to_locale_string)
     // 3. Let dateTimeFormat be ? CreateDateTimeFormat(%Intl.DateTimeFormat%, locales, options, ANY, ALL, zonedDateTime.[[TimeZone]]).
     auto date_time_format = TRY(Intl::create_date_time_format(vm, realm.intrinsics().intl_date_time_format_constructor(), locales, options, Intl::OptionRequired::Any, Intl::OptionDefaults::All, zoned_date_time->time_zone()));
 
-    // 4. If zonedDateTime.[[Calendar]] is not "iso8601" and CalendarEquals(zonedDateTime.[[Calendar]], dateTimeFormat.[[Calendar]]) is false, then
-    if (zoned_date_time->calendar() != "iso8601"sv && !calendar_equals(zoned_date_time->calendar(), date_time_format->calendar())) {
-        // a. Throw a RangeError exception.
+    // 4. If zonedDateTime.[[Calendar]] is not "iso8601" and CalendarEquals(zonedDateTime.[[Calendar]], dateTimeFormat.[[Calendar]]) is false, throw a RangeError exception.
+    if (zoned_date_time->calendar() != ISO8601_CALENDAR && !calendar_equals(zoned_date_time->calendar(), date_time_format->calendar()))
         return vm.throw_completion<RangeError>(ErrorType::IntlTemporalInvalidCalendar, "Temporal.ZonedDateTime"sv, zoned_date_time->calendar(), date_time_format->calendar());
-    }
 
     // 5. Let instant be ! CreateTemporalInstant(zonedDateTime.[[EpochNanoseconds]]).
     auto instant = MUST(create_temporal_instant(vm, zoned_date_time->epoch_nanoseconds()));

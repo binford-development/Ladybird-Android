@@ -37,7 +37,7 @@ TableGrid TableGrid::calculate_row_column_grid(Box const& box, Vector<Cell>& cel
         // NB: The remaining steps already accomplish the same thing in this case.
 
         // 5. Let current cell be the first td or th element child in the tr element being processed.
-        for (auto* child = row.first_child(); child; child = child->next_sibling()) {
+        for (auto child = row.first_child(); child; child = child->next_sibling()) {
             // NB: This actually applies to children with `display: table-cell`, not just td/th elements.
             if (!child->display().is_table_cell())
                 continue;
@@ -121,10 +121,13 @@ TableGrid TableGrid::calculate_row_column_grid(Box const& box, Vector<Cell>& cel
     };
 
     auto process_col_group = [&](auto& col_group) {
-        auto dom_node = col_group.dom_node();
-        dom_node->for_each_in_subtree([&](auto& descendant) {
-            if (descendant.layout_node() && descendant.layout_node()->display().is_table_column())
-                x_width += 1;
+        col_group.template for_each_in_subtree_of_type<Box>([&](auto& descendant_box) {
+            if (descendant_box.display().is_table_column()) {
+                u32 span = 1;
+                if (auto const* col_element = as_if<HTML::HTMLTableColElement>(descendant_box.dom_node()))
+                    span = col_element->span();
+                x_width += span;
+            }
             return TraversalDecision::Continue;
         });
     };

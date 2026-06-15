@@ -38,9 +38,15 @@ ByteLengthQueuingStrategy
 CDATASection
 CSSAnimation
 CSSConditionRule
+CSSContainerRule
 CSSCounterStyleRule
 CSSFontFaceDescriptors
 CSSFontFaceRule
+CSSFontFeatureValuesMap
+CSSFontFeatureValuesRule
+CSSFunctionDeclarations
+CSSFunctionDescriptors
+CSSFunctionRule
 CSSGroupingRule
 CSSImageValue
 CSSImportRule
@@ -72,6 +78,7 @@ CSSRotate
 CSSRule
 CSSRuleList
 CSSScale
+CSSScopeRule
 CSSSkew
 CSSSkewX
 CSSSkewY
@@ -88,10 +95,12 @@ CSSTranslate
 CSSUnitValue
 CSSUnparsedValue
 CSSVariableReferenceValue
+Cache
 CacheStorage
 CanvasGradient
 CanvasPattern
 CanvasRenderingContext2D
+CaretPosition
 ChannelMergerNode
 ChannelSplitterNode
 CharacterData
@@ -289,6 +298,8 @@ ManagedSourceBuffer
 Map
 MathMLElement
 MediaCapabilities
+MediaDeviceInfo
+MediaDevices
 MediaElementAudioSourceNode
 MediaError
 MediaKeySystemAccess
@@ -297,6 +308,9 @@ MediaQueryList
 MediaQueryListEvent
 MediaSource
 MediaSourceHandle
+MediaStream
+MediaStreamTrack
+MediaStreamTrackEvent
 MessageChannel
 MessageEvent
 MessagePort
@@ -314,7 +328,6 @@ NavigationHistoryEntry
 NavigationTransition
 Navigator
 Node
-NodeFilter
 NodeIterator
 NodeList
 Notification
@@ -342,6 +355,8 @@ PerformanceObserverEntryList
 PerformanceResourceTiming
 PerformanceTiming
 PeriodicWave
+PermissionStatus
+Permissions
 Plugin
 PluginArray
 PointerEvent
@@ -369,6 +384,7 @@ ResizeObserverSize
 Response
 SVGAElement
 SVGAnimatedEnumeration
+SVGAnimatedInteger
 SVGAnimatedLength
 SVGAnimatedLengthList
 SVGAnimatedNumber
@@ -388,6 +404,7 @@ SVGFEBlendElement
 SVGFEColorMatrixElement
 SVGFEComponentTransferElement
 SVGFECompositeElement
+SVGFEDisplacementMapElement
 SVGFEDropShadowElement
 SVGFEFloodElement
 SVGFEFuncAElement
@@ -400,6 +417,7 @@ SVGFEMergeElement
 SVGFEMergeNodeElement
 SVGFEMorphologyElement
 SVGFEOffsetElement
+SVGFETurbulenceElement
 SVGFilterElement
 SVGForeignObjectElement
 SVGGElement
@@ -417,6 +435,7 @@ SVGMetadataElement
 SVGNumber
 SVGNumberList
 SVGPathElement
+SVGPatternElement
 SVGPoint
 SVGPolygonElement
 SVGPolylineElement
@@ -442,6 +461,7 @@ SVGViewElement
 Screen
 ScreenOrientation
 ScriptProcessorNode
+ScrollTimeline
 SecurityPolicyViolationEvent
 Selection
 Serial
@@ -450,7 +470,6 @@ ServiceWorker
 ServiceWorkerContainer
 ServiceWorkerRegistration
 Set
-ShadowRealm
 ShadowRoot
 SharedArrayBuffer
 SharedWorker
@@ -484,6 +503,7 @@ Symbol
 SyntaxError
 Text
 TextDecoder
+TextDecoderStream
 TextEncoder
 TextEncoderStream
 TextEvent
@@ -559,7 +579,12 @@ XMLSerializer
 XPathEvaluator
 XPathExpression
 XPathResult
+XRLayer
+XRRenderState
+XRSession
+XRSessionEvent
 XRSystem
+XRWebGLLayer
 __finishTest
 __preventMultipleTestFunctions
 animationFrame
@@ -572,4 +597,5 @@ removeTestErrorHandler
 spoofCurrentURL
 test
 timeout
+uniqueLocalhostHostname
 webkitURL

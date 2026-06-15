@@ -6,13 +6,10 @@
 
 #pragma once
 
+#include <LibWeb/Bindings/File.h>
 #include <LibWeb/FileAPI/Blob.h>
 
 namespace Web::FileAPI {
-
-struct FilePropertyBag : BlobPropertyBag {
-    Optional<i64> last_modified;
-};
 
 class File : public Blob {
     WEB_PLATFORM_OBJECT(File, Blob);
@@ -20,8 +17,8 @@ class File : public Blob {
 
 public:
     static GC::Ref<File> create(JS::Realm& realm);
-    static WebIDL::ExceptionOr<GC::Ref<File>> create(JS::Realm&, BlobParts const& file_bits, String const& file_name, Optional<FilePropertyBag> const& options = {});
-    static WebIDL::ExceptionOr<GC::Ref<File>> construct_impl(JS::Realm&, BlobParts const& file_bits, String const& file_name, Optional<FilePropertyBag> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<File>> create(JS::Realm&, BlobParts const& file_bits, String const& file_name, Optional<Bindings::FilePropertyBag> const& options = {});
+    static WebIDL::ExceptionOr<GC::Ref<File>> construct_impl(JS::Realm&, BlobParts const& file_bits, String const& file_name, Optional<Bindings::FilePropertyBag> const& options = {});
 
     virtual ~File() override;
 
@@ -29,8 +26,6 @@ public:
     String const& name() const { return m_name; }
     // https://w3c.github.io/FileAPI/#dfn-lastModified
     i64 last_modified() const { return m_last_modified; }
-
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::File; }
 
     virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
     virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;

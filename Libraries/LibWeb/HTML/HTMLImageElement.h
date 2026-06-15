@@ -11,11 +11,9 @@
 #include <AK/OwnPtr.h>
 #include <LibGC/Function.h>
 #include <LibGfx/Forward.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
-#include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/DOM/ViewportClient.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
 #include <LibWeb/HTML/SourceSet.h>
@@ -25,19 +23,20 @@ namespace Web::HTML {
 
 class HTMLImageElement final
     : public HTMLElement
-    , public FormAssociatedElement
     , public LazyLoadingElement<HTMLImageElement>
     , public Layout::ImageProvider
-    , public DOM::Document::ViewportClient {
+    , public DOM::ViewportClient {
     WEB_PLATFORM_OBJECT(HTMLImageElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLImageElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLImageElement);
     LAZY_LOADING_ELEMENT(HTMLImageElement);
 
 public:
     static constexpr bool OVERRIDES_FINALIZE = true;
 
     virtual ~HTMLImageElement() override;
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
@@ -50,8 +49,7 @@ public:
 
     String alt() const { return get_attribute_value(HTML::AttributeNames::alt); }
 
-    RefPtr<Gfx::ImmutableBitmap> immutable_bitmap() const;
-    virtual RefPtr<Gfx::ImmutableBitmap> default_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> default_image_frame_sized(Gfx::IntSize) const override;
 
     WebIDL::UnsignedLong width() const;
     void set_width(WebIDL::UnsignedLong);
@@ -93,6 +91,10 @@ public:
 
     void set_source_set(SourceSet);
 
+    // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attribute-source
+    DOM::Element const& dimension_attribute_source() const;
+    void set_dimension_attribute_source(DOM::Element const*);
+
     ImageRequest& current_request() { return *m_current_request; }
     ImageRequest const& current_request() const { return *m_current_request; }
 
@@ -109,7 +111,7 @@ public:
     virtual Optional<CSSPixels> intrinsic_width() const override;
     virtual Optional<CSSPixels> intrinsic_height() const override;
     virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
-    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap_sized(Gfx::IntSize) const override;
+    virtual Optional<Gfx::DecodedImageFrame> current_image_frame_sized(Gfx::IntSize) const override;
     virtual void set_visible_in_viewport(bool) override;
     virtual GC::Ptr<DOM::Element const> to_html_element() const override { return *this; }
     virtual GC::Ptr<DecodedImageData> decoded_image_data() const override;
@@ -129,25 +131,28 @@ private:
     virtual void adopted_from(DOM::Document&) override;
 
     virtual bool is_presentational_hint(FlyString const&) const override;
-    virtual void apply_presentational_hints(GC::Ref<CSS::CascadedProperties>) const override;
+    virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
 
     // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attributes
     virtual bool supports_dimension_attributes() const override { return true; }
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
     virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
     virtual void did_set_viewport_rect(CSSPixelRect const&) override;
 
     void handle_successful_fetch(URL::URL const&, StringView mime_type, ImageRequest&, ByteBuffer, bool maybe_omit_events, URL::URL const& previous_url);
     void handle_failed_fetch();
-    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url);
+    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url, u64 update_the_image_data_count);
 
+    bool current_request_has_running_animation() const;
+    void start_animation_timer_if_visible();
     void animate();
 
     RefPtr<Core::Timer> m_animation_timer;
     size_t m_current_frame_index { 0 };
     size_t m_loops_completed { 0 };
+    bool m_animation_paused_by_visibility { false };
 
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 
@@ -168,6 +173,10 @@ private:
     SourceSet m_source_set;
 
     CSSPixelSize m_last_seen_viewport_size;
+
+    // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attribute-source
+    // Each img element has a dimension attribute source, which must initially be the img element itself.
+    GC::Ptr<DOM::Element const> m_dimension_attribute_source;
 
     u64 m_update_the_image_data_count { 0 };
 };

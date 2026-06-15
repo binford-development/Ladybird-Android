@@ -16,7 +16,7 @@ namespace Web::Clipboard {
 GC_DEFINE_ALLOCATOR(ClipboardItem);
 
 // https://w3c.github.io/clipboard-apis/#dom-clipboarditem-clipboarditem
-WebIDL::ExceptionOr<GC::Ref<ClipboardItem>> ClipboardItem::construct_impl(JS::Realm& realm, OrderedHashMap<String, GC::Root<WebIDL::Promise>> const& items, ClipboardItemOptions const& options)
+WebIDL::ExceptionOr<GC::Ref<ClipboardItem>> ClipboardItem::construct_impl(JS::Realm& realm, GC::OrderedRootHashMap<String, GC::Ref<WebIDL::Promise>> const& items, Bindings::ClipboardItemOptions const& options)
 {
     // 1. If items is empty, then throw a TypeError.
     if (items.is_empty())
@@ -154,7 +154,7 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> ClipboardItem::get_type(String con
                         WebIDL::resolve_promise(realm, promise, blob_data);
                     }
                     // 2. If v is a Blob, then follow the below steps:
-                    if (value.is_object() && is<FileAPI::Blob>(value.as_object())) {
+                    if (value.is<FileAPI::Blob>()) {
                         // 1. Resolve p with v.
                         WebIDL::resolve_promise(realm, promise, value);
                     }

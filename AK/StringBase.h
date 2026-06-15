@@ -59,16 +59,19 @@ public:
 
     constexpr ~StringBase()
     {
-        if (!is_constant_evaluated())
+        if !consteval {
             destroy_string();
+        }
     }
 
     // NOTE: This is primarily interesting to unit tests.
     [[nodiscard]] constexpr bool is_short_string() const
     {
-        if (is_constant_evaluated())
+        if consteval {
             return (m_impl.short_string.byte_count_and_short_string_flag & SHORT_STRING_FLAG) != 0;
-        return (short_string_without_union_member_assertion().byte_count_and_short_string_flag & SHORT_STRING_FLAG) != 0;
+        } else {
+            return (short_string_without_union_member_assertion().byte_count_and_short_string_flag & SHORT_STRING_FLAG) != 0;
+        }
     }
 
     // Returns the underlying UTF-8 encoded bytes.
@@ -81,17 +84,13 @@ public:
 
     [[nodiscard]] bool operator==(StringBase const&) const;
 
-    [[nodiscard]] ALWAYS_INLINE constexpr FlatPtr raw(Badge<FlyString>) const { return bit_cast<FlatPtr>(m_impl); }
-    [[nodiscard]] ALWAYS_INLINE constexpr FlatPtr raw(Badge<String>) const { return bit_cast<FlatPtr>(m_impl); }
-
-    template<typename Func>
-    ALWAYS_INLINE ErrorOr<void> replace_with_new_string(Badge<StringView>, size_t byte_count, Func&& callback)
+    [[nodiscard]] ALWAYS_INLINE constexpr FlatPtr raw(Badge<FlyString, String>) const
     {
-        return replace_with_new_string(byte_count, forward<Func>(callback));
+        return bit_cast<FlatPtr>(m_impl);
     }
 
     template<typename Func>
-    ALWAYS_INLINE ErrorOr<void> replace_with_new_string(Badge<Utf16View>, size_t byte_count, Func&& callback)
+    ALWAYS_INLINE ErrorOr<void> replace_with_new_string(Badge<StringView, Utf16View>, size_t byte_count, Func&& callback)
     {
         return replace_with_new_string(byte_count, forward<Func>(callback));
     }

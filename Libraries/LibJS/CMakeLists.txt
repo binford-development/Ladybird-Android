@@ -1,21 +1,16 @@
 include(libjs_generators)
 
 set(SOURCES
-    AST.cpp
-    Bytecode/ASTCodegen.cpp
-    Bytecode/BasicBlock.cpp
-    Bytecode/Builtins.cpp
-    Bytecode/CodeGenerationError.cpp
+    Bytecode/AsmInterpreter/AsmSlowPaths.cpp
     Bytecode/Executable.cpp
-    Bytecode/Generator.cpp
     Bytecode/IdentifierTable.cpp
     Bytecode/Instruction.cpp
     Bytecode/Interpreter.cpp
-    Bytecode/Label.cpp
+    Bytecode/PropertyNameIterator.cpp
     Bytecode/PropertyKeyTable.cpp
     Bytecode/RegexTable.cpp
-    Bytecode/ScopedOperand.cpp
     Bytecode/StringTable.cpp
+    Bytecode/Validator.cpp
     Console.cpp
     Contrib/Test262/262Object.cpp
     Contrib/Test262/AgentObject.cpp
@@ -23,11 +18,10 @@ set(SOURCES
     Contrib/Test262/IsHTMLDDA.cpp
     CyclicModule.cpp
     Heap/Cell.cpp
-    Lexer.cpp
     Module.cpp
-    Parser.cpp
     ParserError.cpp
     Print.cpp
+    RustIntegration.cpp
     Runtime/AbstractOperations.cpp
     Runtime/Accessor.cpp
     Runtime/Agent.cpp
@@ -65,14 +59,15 @@ set(SOURCES
     Runtime/BooleanObject.cpp
     Runtime/BooleanPrototype.cpp
     Runtime/BoundFunction.cpp
+    Runtime/ClassConstruction.cpp
     Runtime/ClassFieldDefinition.cpp
     Runtime/Completion.cpp
-    Runtime/CompletionCell.cpp
     Runtime/ConsoleObjectPrototype.cpp
     Runtime/ConsoleObject.cpp
     Runtime/DataView.cpp
     Runtime/DataViewConstructor.cpp
     Runtime/DataViewPrototype.cpp
+    Runtime/DescriptorArray.cpp
     Runtime/Date.cpp
     Runtime/DateConstructor.cpp
     Runtime/DatePrototype.cpp
@@ -82,11 +77,14 @@ set(SOURCES
     Runtime/DisposableStackPrototype.cpp
     Runtime/ECMAScriptFunctionObject.cpp
     Runtime/Environment.cpp
+    Runtime/EnvironmentShape.cpp
     Runtime/Error.cpp
     Runtime/ErrorConstructor.cpp
+    Runtime/ErrorData.cpp
     Runtime/ErrorPrototype.cpp
     Runtime/ErrorTypes.cpp
     Runtime/ExecutionContext.cpp
+    Runtime/InterpreterStack.cpp
     Runtime/FinalizationRegistry.cpp
     Runtime/FinalizationRegistryConstructor.cpp
     Runtime/FinalizationRegistryPrototype.cpp
@@ -98,7 +96,6 @@ set(SOURCES
     Runtime/GeneratorFunctionPrototype.cpp
     Runtime/GeneratorObject.cpp
     Runtime/GeneratorPrototype.cpp
-    Runtime/GeneratorResult.cpp
     Runtime/GlobalEnvironment.cpp
     Runtime/GlobalObject.cpp
     Runtime/IndexedProperties.cpp
@@ -196,9 +193,6 @@ set(SOURCES
     Runtime/SetIterator.cpp
     Runtime/SetIteratorPrototype.cpp
     Runtime/SetPrototype.cpp
-    Runtime/ShadowRealm.cpp
-    Runtime/ShadowRealmConstructor.cpp
-    Runtime/ShadowRealmPrototype.cpp
     Runtime/Shape.cpp
     Runtime/SharedArrayBufferConstructor.cpp
     Runtime/SharedArrayBufferPrototype.cpp
@@ -262,13 +256,11 @@ set(SOURCES
     Runtime/WeakSetConstructor.cpp
     Runtime/WeakSetPrototype.cpp
     Runtime/WrapForValidIteratorPrototype.cpp
-    Runtime/WrappedFunction.cpp
     Script.cpp
     SourceCode.cpp
     SourceTextModule.cpp
     SyntaxHighlighter.cpp
     SyntheticModule.cpp
-    Token.cpp
 )
 
 generate_bytecode_def_derived()
@@ -277,10 +269,7 @@ set(GENERATED_SOURCES Bytecode/Op.cpp)
 
 ladybird_lib(LibJS js EXPLICIT_SYMBOL_EXPORT)
 
-find_package(simdjson CONFIG REQUIRED)
-target_link_libraries(LibJS PRIVATE simdjson::simdjson)
-
-target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibGC)
+target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibTextCodec LibGC simdjson::simdjson)
 
 # Link LibUnicode publicly to ensure ICU data (which is in libicudata.a) is available in any process using LibJS.
 target_link_libraries(LibJS PUBLIC LibUnicode)
@@ -292,7 +281,7 @@ endif()
 
 if (WIN32)
     # FIXME: Windows on ARM
-    target_link_libraries(LibJS PRIVATE clang_rt.builtins-x86_64.lib)
+    target_link_libraries(LibJS PRIVATE clang_rt.builtins-x86_64.lib kernel32 ntdll Ws2_32 userenv)
 else()
     # This flag has no effect on Windows
     target_compile_options(LibJS PRIVATE -fno-omit-frame-pointer)
@@ -300,9 +289,142 @@ endif()
 
 target_link_libraries(LibJS PUBLIC JSClangPlugin)
 
-if (WIN32 AND ENABLE_ADDRESS_SANITIZER)
-    # FIXME: Fix address sanitizer stack-overflow error when running test-js.
-    # Even tripling the stack size for this target to 24MB didn't fix it, so it is most likely some ASAN related bug/quirk given test-js passes using the 8MB stack without ASAN
-    # ==9948==ERROR: AddressSanitizer: stack-overflow on address 0x7ffd983a6f47 (pc 0x7ffd983a6f47 bp 0x004e514053e0 sp 0x004e51405348 T0)
-    target_compile_options(LibJS PRIVATE -fno-sanitize=address)
+import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libjs_rust FFI_HEADER RustFFI.h)
+target_link_libraries(LibJS PRIVATE libjs_rust)
+if ((LINUX OR BSD) AND NOT BUILD_SHARED_LIBS)
+    # Rust staticlibs each carry the same allocator shim symbols. LibJS can
+    # pull in multiple crates' copies in static ELF links, but they all
+    # forward to the same ladybird_rust_* entry points in AK/kmalloc.cpp.
+    target_link_options(LibJS INTERFACE LINKER:--allow-multiple-definition)
+endif()
+
+# The Rust library and LibJS have a circular dependency (C++ calls Rust
+# entry points, Rust calls C++ callbacks). For static builds, merge the
+# Rust archive into the LibJS archive so all symbols are in one place.
+if(NOT BUILD_SHARED_LIBS)
+    add_custom_command(TARGET LibJS POST_BUILD
+        COMMAND ${CMAKE_AR} -x $<TARGET_FILE:libjs_rust>
+        COMMAND ${CMAKE_AR} -qS $<TARGET_FILE:LibJS> *.o
+        COMMAND ${CMAKE_RANLIB} $<TARGET_FILE:LibJS>
+        COMMAND ${CMAKE_COMMAND} -E remove -f *.o
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rust_merge_tmp
+        COMMENT "Merging Rust archive into LibJS"
+    )
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rust_merge_tmp)
+
+    # POST_BUILD steps don't track inputs, so when libjs_rust.a changes ninja
+    # leaves liblagom-js.a alone and the merged archive ends up with stale
+    # Rust objects. Force the C++ FFI bridge file to depend on the Rust
+    # archive: when it changes, RustIntegration.cpp recompiles, LibJS gets
+    # re-archived, and POST_BUILD re-merges the fresh Rust objects.
+    get_target_property(_libjs_rust_lib libjs_rust IMPORTED_LOCATION)
+    set_property(SOURCE RustIntegration.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libjs_rust_lib})
+endif()
+
+# AsmInterpreter: generate platform-specific assembly from DSL.
+if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|AMD64)$")
+    set(ASMINT_ARCH "x86_64")
+elseif ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64|ARM64)$")
+    set(ASMINT_ARCH "aarch64")
+else()
+    message(FATAL_ERROR "LibJS requires AsmInterpreter support for ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+if (DEFINED ASMINT_ARCH)
+    enable_language(ASM)
+    if (WIN32 AND CMAKE_ASM_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase "")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_EditAndContinue "")
+    endif()
+    set(ASMINTGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/AsmIntGen")
+    set(ASMINTGEN_BIN "${ASMINTGEN_DIR}/target/release/asmintgen${CMAKE_EXECUTABLE_SUFFIX}")
+    set(ASMINT_DSL "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/asmint.asm")
+    set(ASMINT_GENERATED_S "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asmint_${ASMINT_ARCH}.S")
+    set(ASM_OFFSETS_FILE "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asm_offsets.conf")
+
+    # Build-time offset generator: compiles a small C++ program that uses
+    # offsetof() to emit struct field offsets as DSL constants.
+    add_executable(gen_asm_offsets "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/gen_asm_offsets.cpp")
+    target_link_libraries(gen_asm_offsets PRIVATE AK)
+    if (MSVC)
+        target_compile_definitions(gen_asm_offsets PRIVATE _ALLOW_KEYWORD_MACROS)
+    endif()
+    target_compile_definitions(gen_asm_offsets PRIVATE private=public protected=public)
+    # NB: Strip fuzzer sanitizer flags so gen_asm_offsets can define its own main().
+    if (ENABLE_FUZZERS_LIBFUZZER)
+        target_compile_options(gen_asm_offsets PRIVATE -fno-sanitize=fuzzer)
+        target_link_options(gen_asm_offsets PRIVATE -fno-sanitize=fuzzer)
+    endif()
+    # NB: gen_asm_offsets no longer depends on Op.h since opcode field
+    # offsets are now computed from Bytecode.def by asmintgen directly.
+
+    add_custom_command(
+        OUTPUT "${ASM_OFFSETS_FILE}"
+        COMMAND "$<TARGET_FILE:gen_asm_offsets>" > "${ASM_OFFSETS_FILE}"
+        DEPENDS gen_asm_offsets
+        COMMENT "Generating asm struct offsets"
+    )
+
+    file(GLOB ASMINTGEN_RUST_SOURCES CONFIGURE_DEPENDS "${ASMINTGEN_DIR}/src/*.rs")
+    file(GLOB ASMINTGEN_BYTECODE_DEF_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/BytecodeDef/src/*.rs")
+    set(ASMINTGEN_SOURCES
+        "${ASMINTGEN_DIR}/Cargo.toml"
+        "${ASMINTGEN_DIR}/Cargo.lock"
+        "${CMAKE_CURRENT_SOURCE_DIR}/BytecodeDef/Cargo.toml"
+        ${ASMINTGEN_RUST_SOURCES}
+        ${ASMINTGEN_BYTECODE_DEF_SOURCES}
+    )
+    # NB: Clear linker-related env vars so cargo uses the default host
+    # linker. The CI may set CC/CXX or CARGO_TARGET_*_LINKER to a
+    # compiler that isn't available in all build configurations (e.g.
+    # clang-21 in GNU builds). asmintgen is a pure Rust host tool.
+    add_custom_command(
+        OUTPUT "${ASMINTGEN_BIN}"
+        COMMAND ${CMAKE_COMMAND} -E env
+            --unset=CC
+            --unset=CXX
+            --unset=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+            --unset=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            cargo build --release
+        WORKING_DIRECTORY "${ASMINTGEN_DIR}"
+        DEPENDS ${ASMINTGEN_SOURCES}
+        COMMENT "Building asmintgen"
+    )
+
+    set(BYTECODE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/Bytecode.def")
+
+    if (WIN32)
+        set(ASMINT_OBJ_FORMAT "coff")
+    elseif (APPLE)
+        set(ASMINT_OBJ_FORMAT "macho")
+    else()
+        set(ASMINT_OBJ_FORMAT "elf")
+    endif()
+
+    set(ASMINT_EXTRA_FLAGS "")
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug"
+        OR ENABLE_ADDRESS_SANITIZER
+        OR ENABLE_MEMORY_SANITIZER
+        OR ENABLE_UNDEFINED_SANITIZER)
+        list(APPEND ASMINT_EXTRA_FLAGS "--enable-assertions")
+    endif()
+    # All Apple Silicon chips are ARMv8.5+ which includes FEAT_JSCVT.
+    if ("${ASMINT_ARCH}" STREQUAL "aarch64" AND APPLE)
+        list(APPEND ASMINT_EXTRA_FLAGS "--has-jscvt")
+    endif()
+
+    add_custom_command(
+        OUTPUT "${ASMINT_GENERATED_S}"
+        COMMAND "${ASMINTGEN_BIN}" --arch ${ASMINT_ARCH}
+            --object-format ${ASMINT_OBJ_FORMAT}
+            --constants "${ASM_OFFSETS_FILE}"
+            --bytecode-def "${BYTECODE_DEF}"
+            --input "${ASMINT_DSL}"
+            --output "${ASMINT_GENERATED_S}"
+            ${ASMINT_EXTRA_FLAGS}
+        DEPENDS "${ASMINTGEN_BIN}" "${ASMINT_DSL}" "${ASM_OFFSETS_FILE}" "${BYTECODE_DEF}"
+        COMMENT "Generating asmint_${ASMINT_ARCH}.S from DSL"
+    )
+
+    target_sources(LibJS PRIVATE "${ASMINT_GENERATED_S}")
 endif()

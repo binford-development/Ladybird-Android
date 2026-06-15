@@ -10,6 +10,7 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/RefCounted.h>
+#include <AK/Time.h>
 #include <AK/Weakable.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibURL/URL.h>
@@ -20,13 +21,15 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/MimeSniff/MimeType.h>
+#include <LibWeb/Platform/Timer.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/XHR/XMLHttpRequestEventTarget.h>
 
 namespace Web::XHR {
 
 // https://fetch.spec.whatwg.org/#typedefdef-xmlhttprequestbodyinit
-using DocumentOrXMLHttpRequestBodyInit = Variant<GC::Root<Web::DOM::Document>, GC::Root<Web::FileAPI::Blob>, GC::Root<WebIDL::BufferSource>, GC::Root<XHR::FormData>, GC::Root<Web::DOMURL::URLSearchParams>, AK::String>;
+using DocumentOrXMLHttpRequestBodyInit = FlattenVariant<Variant<GC::Ref<Web::DOM::Document>>, Fetch::XMLHttpRequestBodyInit>;
+using NullableDocumentOrXMLHttpRequestBodyInit = FlattenVariant<DocumentOrXMLHttpRequestBodyInit, Variant<Empty>>;
 
 class XMLHttpRequest final : public XMLHttpRequestEventTarget {
     WEB_PLATFORM_OBJECT(XMLHttpRequest, XMLHttpRequestEventTarget);
@@ -58,7 +61,7 @@ public:
 
     WebIDL::ExceptionOr<void> open(String const& method, String const& url);
     WebIDL::ExceptionOr<void> open(String const& method, String const& url, bool async, Optional<String> const& username = Optional<String> {}, Optional<String> const& password = Optional<String> {});
-    WebIDL::ExceptionOr<void> send(Optional<DocumentOrXMLHttpRequestBodyInit> body);
+    WebIDL::ExceptionOr<void> send(NullableDocumentOrXMLHttpRequestBodyInit body);
 
     WebIDL::ExceptionOr<void> set_request_header(String const& name, String const& value);
     WebIDL::ExceptionOr<void> set_response_type(Bindings::XMLHttpRequestResponseType);
@@ -96,6 +99,8 @@ private:
     WebIDL::ExceptionOr<void> handle_response_end_of_body();
     WebIDL::ExceptionOr<void> handle_errors();
     JS::ThrowCompletionOr<void> request_error_steps(FlyString const& event_name, GC::Ptr<WebIDL::DOMException> exception = nullptr);
+
+    void stop_timeout_timer();
 
     XMLHttpRequest(JS::Realm&, XMLHttpRequestUpload&, NonnullRefPtr<HTTP::HeaderList>, Fetch::Infrastructure::Response&, Fetch::Infrastructure::FetchController&);
 
@@ -203,6 +208,10 @@ private:
 
     // Non-standard, see async path in `send()`
     u64 m_request_body_transmitted { 0 };
+    Optional<MonotonicTime> m_last_upload_progress_timestamp;
+    Optional<MonotonicTime> m_last_download_progress_timestamp;
+
+    GC::Ptr<Platform::Timer> m_timeout_timer;
 };
 
 }

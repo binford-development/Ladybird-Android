@@ -6,7 +6,7 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SpeechSynthesisPrototype.h>
+#include <LibWeb/Bindings/SpeechSynthesis.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/Speech/SpeechSynthesis.h>
 #include <LibWeb/Speech/SpeechSynthesisVoice.h>
@@ -47,6 +47,12 @@ void SpeechSynthesis::set_onvoiceschanged(GC::Ptr<WebIDL::CallbackType> event_ha
 GC::Ptr<WebIDL::CallbackType> SpeechSynthesis::onvoiceschanged()
 {
     return event_handler_attribute(HTML::EventNames::voiceschanged);
+}
+
+// https://wicg.github.io/speech-api/#dom-speechsynthesis-cancel
+void SpeechSynthesis::cancel()
+{
+    dbgln("FIXME: Implement SpeechSynthesis::cancel()");
 }
 
 // https://wicg.github.io/speech-api/#dom-speechsynthesis-getvoices

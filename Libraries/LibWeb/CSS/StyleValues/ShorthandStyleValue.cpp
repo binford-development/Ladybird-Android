@@ -10,12 +10,14 @@
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridAutoFlowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTemplateAreaStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackPlacementStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
+#include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
 
 namespace Web::CSS {
 
@@ -68,9 +70,20 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         return;
     }
 
-    auto const coordinating_value_list_shorthand_serialize = [&](StringView entry_when_all_longhands_initial, Vector<PropertyID> const& required_longhands = {}, Vector<PropertyID> const& reset_only_longhands = {}) {
+    enum class AllowResolvedZeroDurationAsInitial {
+        No,
+        Yes,
+    };
+
+    auto const coordinating_value_list_shorthand_serialize = [&](StringView entry_when_all_longhands_initial, Vector<PropertyID> const& required_longhands = {}, Vector<PropertyID> const& reset_only_longhands = {}, AllowResolvedZeroDurationAsInitial allow_resolved_zero_duration_as_initial = AllowResolvedZeroDurationAsInitial::No) {
         for (auto reset_only_longhand : reset_only_longhands) {
             if (!longhand(reset_only_longhand)->equals(property_initial_value(reset_only_longhand)))
+                return;
+        }
+
+        // If any non-reset-only longhand is not a value list, we can't serialize as a coordinating-list shorthand.
+        for (auto sub_property : m_properties.sub_properties) {
+            if (!reset_only_longhands.contains_slow(sub_property) && !longhand(sub_property)->is_value_list())
                 return;
         }
 
@@ -79,6 +92,17 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         // If we don't have the same number of values for each non-reset-only longhand, we can't serialize this shorthand.
         if (any_of(m_properties.sub_properties, [&](auto longhand_id) { return !reset_only_longhands.contains_slow(longhand_id) && longhand(longhand_id)->as_value_list().size() != entry_count; }))
             return;
+
+        auto longhand_value_is_initial = [&](PropertyID longhand_id, StyleValue const& value) {
+            if (allow_resolved_zero_duration_as_initial == AllowResolvedZeroDurationAsInitial::Yes
+                && longhand_id == PropertyID::AnimationDuration
+                && value.is_time()
+                && value.as_time().time().to_seconds() == 0) {
+                return true;
+            }
+
+            return value.equals(*property_initial_value(longhand_id)->as_value_list().values()[0]);
+        };
 
         // We should serialize a longhand if it is not a reset-only longhand and one of the following is true:
         // - The longhand is required
@@ -95,7 +119,7 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
 
             auto longhand_value = longhand(longhand_id)->as_value_list().values()[entry_index];
 
-            if (!longhand_value->equals(property_initial_value(longhand_id)->as_value_list().values()[0]))
+            if (!longhand_value_is_initial(longhand_id, *longhand_value))
                 return true;
 
             for (size_t other_longhand_index = longhand_index + 1; other_longhand_index < m_properties.sub_properties.size(); other_longhand_index++) {
@@ -107,7 +131,7 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
                 auto other_longhand_value = longhand(other_longhand_id)->as_value_list().values()[entry_index];
 
                 // FIXME: This should really account for the other longhand being included in the serialization for any reason, not just because it is not the initial value.
-                if (other_longhand_value->equals(property_initial_value(other_longhand_id)->as_value_list().values()[0]))
+                if (longhand_value_is_initial(other_longhand_id, *other_longhand_value))
                     continue;
 
                 if (parse_css_value(Parser::ParsingParams {}, other_longhand_value->to_string(mode), longhand_id))
@@ -174,6 +198,9 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
             m_properties.values.first()->serialize(builder, mode);
     };
 
+    // FIXME: overflow-clip-margin needs a special case here for when its longhands aren't identical.
+    // Ref: https://github.com/w3c/csswg-drafts/issues/8381
+
     // Then special cases
     switch (m_properties.shorthand_property) {
     case PropertyID::All: {
@@ -182,7 +209,7 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         return;
     }
     case PropertyID::Animation:
-        coordinating_value_list_shorthand_serialize("none"sv, {}, { PropertyID::AnimationTimeline });
+        coordinating_value_list_shorthand_serialize("none"sv, {}, { PropertyID::AnimationTimeline }, AllowResolvedZeroDurationAsInitial::Yes);
         return;
     case PropertyID::Background: {
         auto color = longhand(PropertyID::BackgroundColor);
@@ -246,6 +273,17 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
                 maybe_color_value = color;
 
             serialize_layer(builder, maybe_color_value, get_layer_value(image, i), get_layer_value(position_x, i), get_layer_value(position_y, i), get_layer_value(size, i), get_layer_value(repeat, i), get_layer_value(attachment, i), get_layer_value(origin, i), get_layer_value(clip, i));
+        }
+        return;
+    }
+    case PropertyID::Container: {
+        auto name = longhand(PropertyID::ContainerName);
+        auto type = longhand(PropertyID::ContainerType);
+        name->serialize(builder, mode);
+
+        if (!type->equals(property_initial_value(PropertyID::ContainerType))) {
+            builder.append(" / "sv);
+            type->serialize(builder, mode);
         }
         return;
     }
@@ -422,7 +460,7 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         auto line_height = longhand(PropertyID::LineHeight);
         auto font_family = longhand(PropertyID::FontFamily);
 
-        for (auto const& reset_only_sub_property : { PropertyID::FontFeatureSettings, PropertyID::FontKerning, PropertyID::FontLanguageOverride, PropertyID::FontVariationSettings }) {
+        for (auto const& reset_only_sub_property : { PropertyID::FontFeatureSettings, PropertyID::FontKerning, PropertyID::FontLanguageOverride, PropertyID::FontOpticalSizing, PropertyID::FontVariationSettings }) {
             auto const& value = longhand(reset_only_sub_property);
 
             if (!value->equals(property_initial_value(reset_only_sub_property)))
@@ -634,8 +672,67 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         serialize_grid_area();
         return;
     }
-        // FIXME: Serialize Grid differently once we support it better!
-    case PropertyID::Grid:
+    case PropertyID::Grid: {
+        // https://drafts.csswg.org/css-grid/#propdef-grid
+        // <'grid-template'> |
+        // <'grid-template-rows'> / [ auto-flow && dense? ] <'grid-auto-columns'>? |
+        // [ auto-flow && dense? ] <'grid-auto-rows'>? / <'grid-template-columns'>
+        auto auto_flow_value = longhand(PropertyID::GridAutoFlow);
+        auto auto_rows_value = longhand(PropertyID::GridAutoRows);
+        auto auto_columns_value = longhand(PropertyID::GridAutoColumns);
+
+        auto is_initial = [](ValueComparingRefPtr<StyleValue const> const& value, PropertyID property) {
+            return *value == *property_initial_value(property);
+        };
+
+        bool auto_flow_is_initial = is_initial(auto_flow_value, PropertyID::GridAutoFlow);
+        bool auto_rows_is_initial = is_initial(auto_rows_value, PropertyID::GridAutoRows);
+        bool auto_columns_is_initial = is_initial(auto_columns_value, PropertyID::GridAutoColumns);
+
+        if (!auto_flow_is_initial || !auto_rows_is_initial || !auto_columns_is_initial) {
+            auto areas_value = longhand(PropertyID::GridTemplateAreas);
+            auto rows_value = longhand(PropertyID::GridTemplateRows);
+            auto columns_value = longhand(PropertyID::GridTemplateColumns);
+
+            bool areas_is_initial = is_initial(areas_value, PropertyID::GridTemplateAreas);
+            bool rows_is_initial = is_initial(rows_value, PropertyID::GridTemplateRows);
+            bool columns_is_initial = is_initial(columns_value, PropertyID::GridTemplateColumns);
+
+            auto& auto_flow = auto_flow_value->as_grid_auto_flow();
+
+            // [ auto-flow && dense? ] <'grid-auto-rows'>? / <'grid-template-columns'>
+            if (auto_flow.is_row() && auto_columns_is_initial && areas_is_initial && rows_is_initial) {
+                builder.append("auto-flow"sv);
+                if (auto_flow.is_dense())
+                    builder.append(" dense"sv);
+                if (!auto_rows_is_initial) {
+                    builder.append(' ');
+                    auto_rows_value->serialize(builder, mode);
+                }
+                builder.append(" / "sv);
+                columns_value->serialize(builder, mode);
+                return;
+            }
+
+            // <'grid-template-rows'> / [ auto-flow && dense? ] <'grid-auto-columns'>?
+            if (auto_flow.is_column() && auto_rows_is_initial && areas_is_initial && columns_is_initial) {
+                rows_value->serialize(builder, mode);
+                builder.append(" / auto-flow"sv);
+                if (auto_flow.is_dense())
+                    builder.append(" dense"sv);
+                if (!auto_columns_is_initial) {
+                    builder.append(' ');
+                    auto_columns_value->serialize(builder, mode);
+                }
+                return;
+            }
+
+            return;
+        }
+
+        // <'grid-template'>
+        [[fallthrough]];
+    }
     case PropertyID::GridTemplate: {
         auto areas_value = longhand(PropertyID::GridTemplateAreas);
         auto rows_value = longhand(PropertyID::GridTemplateRows);
@@ -652,13 +749,14 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
         auto& rows = rows_value->as_grid_track_size_list();
         auto& columns = columns_value->as_grid_track_size_list();
 
-        if (areas.grid_template_area().size() == 0 && rows.grid_track_size_list().track_list().size() == 0 && columns.grid_track_size_list().track_list().size() == 0) {
+        if (areas.row_count() == 0 && rows.grid_track_size_list().is_empty() && columns.grid_track_size_list().is_empty()) {
             builder.append("none"sv);
             return;
         }
 
         auto construct_rows_string = [&]() {
             StringBuilder inner_builder;
+            size_t area_index = 0;
             for (size_t i = 0; i < rows.grid_track_size_list().list().size(); ++i) {
                 auto track_size_or_line_names = rows.grid_track_size_list().list()[i];
                 if (auto* line_names = track_size_or_line_names.get_pointer<GridLineNames>()) {
@@ -666,30 +764,31 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
                         inner_builder.append(' ');
                     line_names->serialize(inner_builder);
                 }
-                if (areas.grid_template_area().size() > i) {
-                    if (!inner_builder.is_empty())
-                        inner_builder.append(' ');
-                    inner_builder.append("\""sv);
-                    for (size_t y = 0; y < areas.grid_template_area()[i].size(); ++y) {
-                        if (y != 0)
-                            inner_builder.append(' ');
-                        inner_builder.append(areas.grid_template_area()[i][y]);
-                    }
-                    inner_builder.append("\""sv);
-                }
                 if (auto* track_size = track_size_or_line_names.get_pointer<ExplicitGridTrack>()) {
+                    if (area_index < areas.row_count()) {
+                        if (!inner_builder.is_empty())
+                            inner_builder.append(' ');
+                        inner_builder.append("\""sv);
+                        for (size_t y = 0; y < areas.column_count(); ++y) {
+                            if (y != 0)
+                                inner_builder.append(' ');
+                            inner_builder.append(areas.cell_name_at(area_index, y));
+                        }
+                        inner_builder.append("\""sv);
+                    }
                     auto track_size_serialization = track_size->to_string(mode);
                     if (track_size_serialization != "auto"sv) {
                         if (!inner_builder.is_empty())
                             inner_builder.append(' ');
                         inner_builder.append(track_size_serialization);
                     }
+                    ++area_index;
                 }
             }
             return MUST(inner_builder.to_string());
         };
 
-        if (areas.grid_template_area().is_empty()) {
+        if (areas.row_count() == 0) {
             rows.grid_track_size_list().serialize(builder, mode);
             builder.append(" / "sv);
             columns.grid_track_size_list().serialize(builder, mode);
@@ -704,7 +803,7 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
             builder.append(rows_serialization);
             return;
         }
-        builder.append(construct_rows_string());
+        builder.append(rows_serialization);
         builder.append(" / "sv);
         columns.grid_track_size_list().serialize(builder, mode);
         return;
@@ -712,7 +811,8 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
     case PropertyID::GridColumn: {
         auto start = longhand(PropertyID::GridColumnStart);
         auto end = longhand(PropertyID::GridColumnEnd);
-        if (end->as_grid_track_placement().grid_track_placement().is_auto() || start == end) {
+        if ((end->is_grid_track_placement() && end->as_grid_track_placement().grid_track_placement().is_auto())
+            || start == end) {
             start->serialize(builder, mode);
             return;
         }
@@ -724,7 +824,8 @@ void ShorthandStyleValue::serialize(StringBuilder& builder, SerializationMode mo
     case PropertyID::GridRow: {
         auto start = longhand(PropertyID::GridRowStart);
         auto end = longhand(PropertyID::GridRowEnd);
-        if (end->as_grid_track_placement().grid_track_placement().is_auto() || start == end) {
+        if ((end->is_grid_track_placement() && end->as_grid_track_placement().grid_track_placement().is_auto())
+            || start == end) {
             start->serialize(builder, mode);
             return;
         }

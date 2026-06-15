@@ -11,10 +11,10 @@
 namespace Web::CredentialManagement {
 
 // https://www.w3.org/TR/credential-management-1/#abstract-opdef-create-a-passwordcredential-from-an-htmlformelement
-WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::Realm& realm, GC::Ptr<HTML::HTMLFormElement> const& form, URL::Origin origin)
+WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::Realm& realm, GC::Ref<HTML::HTMLFormElement> form, URL::Origin origin)
 {
     // 1. Let data be a new PasswordCredentialData dictionary.
-    PasswordCredentialData data;
+    Bindings::PasswordCredentialData data;
 
     // 2. Set data’s origin member’s value to origin’s value.
 
@@ -97,7 +97,7 @@ WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::
 }
 
 // https://www.w3.org/TR/credential-management-1/#abstract-opdef-create-a-passwordcredential-from-passwordcredentialdata
-WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::Realm& realm, PasswordCredentialData const& data, URL::Origin origin)
+WebIDL::ExceptionOr<GC::Ref<PasswordCredential>> create_password_credential(JS::Realm& realm, Bindings::PasswordCredentialData const& data, URL::Origin origin)
 {
     // 1. Let c be a new PasswordCredential object.
     // 2. If any of the following are the empty string, throw a TypeError exception:

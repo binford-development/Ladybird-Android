@@ -2,12 +2,14 @@
  * Copyright (c) 2018-2021, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2022, Tobias Christiansen <tobyase@serenityos.org>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
+ * Copyright (c) 2026, Tim Ledbetter <tim.ledbetter@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/CharacterTypes.h>
 #include <AK/StringBuilder.h>
+#include <AK/UnicodeUtils.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/Locale.h>
 #include <LibWeb/DOM/Document.h>
@@ -17,14 +19,58 @@
 
 namespace Web::Layout {
 
-GC_DEFINE_ALLOCATOR(TextNode);
-
 TextNode::TextNode(DOM::Document& document, DOM::Text& text)
     : Node(document, &text)
 {
 }
 
+TextNode::TextNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node)
+    : Node(document, &text, attach_to_dom_node)
+{
+}
+
+TextNode::TextNode(DOM::Document& document)
+    : Node(document, nullptr)
+{
+}
+
 TextNode::~TextNode() = default;
+
+DOM::Element const* TextNode::parent_element_for_text_transform() const
+{
+    return dom_node().parent_element();
+}
+
+bool TextNode::is_password_input() const
+{
+    return dom_node().is_password_input();
+}
+
+GeneratedTextNode::GeneratedTextNode(DOM::Document& document, Utf16String text)
+    : TextNode(document)
+    , m_text(move(text))
+{
+}
+
+GeneratedTextNode::~GeneratedTextNode() = default;
+
+DOM::Element const* GeneratedTextNode::parent_element_for_text_transform() const
+{
+    if (is_generated_for_pseudo_element())
+        return pseudo_element_generator();
+    if (auto const* parent = this->parent(); parent && parent->is_generated_for_pseudo_element())
+        return parent->pseudo_element_generator();
+    return nullptr;
+}
+
+TextSliceNode::TextSliceNode(DOM::Document& document, DOM::Text& text, AttachToDOMNode attach_to_dom_node, size_t dom_start_offset, size_t dom_length)
+    : TextNode(document, text, attach_to_dom_node)
+    , m_dom_start_offset(dom_start_offset)
+    , m_dom_length_in_code_units(dom_length)
+{
+}
+
+TextSliceNode::~TextSliceNode() = default;
 
 // https://w3c.github.io/mathml-core/#new-text-transform-values
 static Utf16String apply_math_auto_text_transform(Utf16String const& string)
@@ -292,39 +338,70 @@ static Utf16String apply_text_transform(Utf16String const& string, CSS::TextTran
     VERIFY_NOT_REACHED();
 }
 
+TextNode::TextForRenderingCacheKey TextNode::create_text_for_rendering_cache_key() const
+{
+    auto text_transform = computed_values().text_transform();
+    Optional<String> lang;
+    if (first_is_one_of(text_transform, CSS::TextTransform::Uppercase, CSS::TextTransform::Lowercase, CSS::TextTransform::Capitalize)) {
+        if (auto parent_element = parent_element_for_text_transform())
+            lang = parent_element->lang();
+    }
+
+    return {
+        .text_transform = text_transform,
+        .white_space_collapse = computed_values().white_space_collapse(),
+        .lang = move(lang),
+        .is_password_input = is_password_input(),
+        .dom_start_offset = dom_start_offset(),
+        .dom_length = dom_length(),
+    };
+}
+
 void TextNode::invalidate_text_for_rendering()
 {
-    m_text_for_rendering = {};
-    m_grapheme_segmenter.clear();
+    m_text_dependent_cache = {};
 }
 
 Utf16String const& TextNode::text_for_rendering() const
 {
-    if (!m_text_for_rendering.has_value())
-        const_cast<TextNode*>(this)->compute_text_for_rendering();
-    return *m_text_for_rendering;
+    return ensure_text_dependent_cache().text_for_rendering;
 }
 
-void TextNode::compute_text_for_rendering()
+TextNode::TextDependentCache const& TextNode::ensure_text_dependent_cache() const
 {
-    if (dom_node().is_password_input()) {
-        m_text_for_rendering = Utf16String::repeated(u'●', dom_node().data().length_in_code_points());
-        return;
+    auto key = create_text_for_rendering_cache_key();
+    if (!m_text_dependent_cache.has_value() || m_text_dependent_cache->key != key) {
+        auto text_for_rendering = compute_text_for_rendering(key);
+        m_text_dependent_cache = TextDependentCache {
+            .key = move(key),
+            .text_for_rendering = move(text_for_rendering),
+            .grapheme_segmenter = {},
+            .line_segmenter = {},
+            .chunk_cache = {},
+        };
+    }
+    return *m_text_dependent_cache;
+}
+
+Utf16String TextNode::compute_text_for_rendering(TextForRenderingCacheKey const& cache_key) const
+{
+    auto const& text_data = text();
+    if (cache_key.is_password_input) {
+        return Utf16String::repeated(u'●', text_data.length_in_code_points());
     }
 
     // Apply text-transform
     // FIXME: This can generate more code points than there were before; we need to find a better way to map the
     //        resulting paintable fragments' offsets into the original text node data.
     //        See: https://github.com/LadybirdBrowser/ladybird/issues/6177
-    auto parent_element = dom_node().parent_element();
-    auto const maybe_lang = parent_element ? parent_element->lang() : Optional<String> {};
-    auto const lang = maybe_lang.has_value() ? maybe_lang.value() : Optional<StringView> {};
-    auto text = apply_text_transform(dom_node().data(), computed_values().text_transform(), lang);
+    auto const lang = cache_key.lang.has_value() ? Optional<StringView> { cache_key.lang->bytes_as_string_view() } : Optional<StringView> {};
+    auto text = apply_text_transform(text_data, cache_key.text_transform, lang);
+    if (cache_key.dom_start_offset > 0 || cache_key.dom_length < text_data.length_in_code_units())
+        text = Utf16String::from_utf16(text.utf16_view().substring_view(cache_key.dom_start_offset, cache_key.dom_length));
 
     // The logic below deals with converting whitespace characters. If we don't have them, return early.
     if (text.is_empty() || !any_of(text, is_ascii_space)) {
-        m_text_for_rendering = move(text);
-        return;
+        return text;
     }
 
     // https://drafts.csswg.org/css-text-4/#white-space-phase-1
@@ -333,7 +410,7 @@ void TextNode::compute_text_for_rendering()
 
     // If white-space-collapse is set to collapse or preserve-breaks, white space characters are considered collapsible
     // and are processed by performing the following steps:
-    auto white_space_collapse = computed_values().white_space_collapse();
+    auto white_space_collapse = cache_key.white_space_collapse;
     if (first_is_one_of(white_space_collapse, CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks)) {
         // 1. FIXME: Any sequence of collapsible spaces and tabs immediately preceding or following a segment break is removed.
 
@@ -374,8 +451,7 @@ void TextNode::compute_text_for_rendering()
 
     // AD-HOC: Prevent allocating a StringBuilder for a single space/newline/tab.
     if (text == " "sv || (convert_tabs && text == "\t"sv) || (convert_newlines && text == "\n"sv)) {
-        m_text_for_rendering = " "_utf16;
-        return;
+        return " "_utf16;
     }
 
     // AD-HOC: It's important to not change the amount of code units in the resulting transformed text, so ChunkIterator
@@ -390,24 +466,76 @@ void TextNode::compute_text_for_rendering()
         text = text_builder.to_utf16_string();
     }
 
-    m_text_for_rendering = move(text);
+    return text;
 }
 
 Unicode::Segmenter& TextNode::grapheme_segmenter() const
 {
-    if (!m_grapheme_segmenter) {
-        auto const& text = text_for_rendering();
+    auto const& cache = ensure_text_dependent_cache();
+    auto const& text = cache.text_for_rendering;
+    if (!cache.grapheme_segmenter) {
         // Fast path: For ASCII text, every character is its own grapheme.
         // We can use a trivial segmenter that avoids all ICU overhead.
         if (text.is_ascii()) {
-            m_grapheme_segmenter = Unicode::Segmenter::create_for_ascii_grapheme(text.length_in_code_units());
+            cache.grapheme_segmenter = Unicode::Segmenter::create_for_ascii_grapheme(text.length_in_code_units());
         } else {
-            m_grapheme_segmenter = document().grapheme_segmenter().clone();
-            m_grapheme_segmenter->set_segmented_text(text);
+            cache.grapheme_segmenter = document().grapheme_segmenter().clone();
+            cache.grapheme_segmenter->set_segmented_text(text);
         }
     }
 
-    return *m_grapheme_segmenter;
+    return *cache.grapheme_segmenter;
+}
+
+Unicode::Segmenter& TextNode::line_segmenter() const
+{
+    auto const& cache = ensure_text_dependent_cache();
+    auto const& text = cache.text_for_rendering;
+    if (!cache.line_segmenter) {
+        if (auto ascii = Unicode::Segmenter::try_create_for_ascii_line(text.utf16_view())) {
+            cache.line_segmenter = ascii.release_nonnull();
+        } else {
+            cache.line_segmenter = document().line_segmenter().clone();
+            cache.line_segmenter->set_segmented_text(text);
+        }
+    }
+
+    return *cache.line_segmenter;
+}
+
+TextNode::ChunkList const& TextNode::chunks_for_layout(bool should_wrap_lines, bool should_respect_linebreaks) const
+{
+    auto const& cache = ensure_text_dependent_cache();
+
+    auto const& computed_values = this->computed_values();
+    ChunkCacheKey key {
+        .should_wrap_lines = should_wrap_lines,
+        .should_respect_linebreaks = should_respect_linebreaks,
+        .white_space_collapse = computed_values.white_space_collapse(),
+        .word_break = computed_values.word_break(),
+        .font_cascade_list = computed_values.font_list(),
+    };
+
+    if (cache.chunk_cache.has_value() && cache.chunk_cache->key == key)
+        return cache.chunk_cache->chunk_list;
+
+    TextNode::ChunkIterator chunk_iterator { *this, should_wrap_lines, should_respect_linebreaks };
+    Vector<TextNode::Chunk> chunks;
+    while (true) {
+        auto chunk = chunk_iterator.next();
+        if (!chunk.has_value())
+            break;
+        chunks.append(chunk.release_value());
+    }
+
+    cache.chunk_cache = ChunkCacheEntry {
+        .key = key,
+        .chunk_list = {
+            .chunks = move(chunks),
+            .should_collapse_whitespace = chunk_iterator.should_collapse_whitespace(),
+        },
+    };
+    return cache.chunk_cache->chunk_list;
 }
 
 static bool is_interword_space(u32 code_point)
@@ -416,17 +544,20 @@ static bool is_interword_space(u32 code_point)
 }
 
 TextNode::ChunkIterator::ChunkIterator(TextNode const& text_node, bool should_wrap_lines, bool should_respect_linebreaks)
-    : ChunkIterator(text_node, text_node.text_for_rendering(), text_node.grapheme_segmenter(), should_wrap_lines, should_respect_linebreaks)
+    : ChunkIterator(text_node, text_node.text_for_rendering(), text_node.grapheme_segmenter(), text_node.line_segmenter(), text_node.computed_values().word_break(), should_wrap_lines, should_respect_linebreaks)
 {
 }
 
 TextNode::ChunkIterator::ChunkIterator(TextNode const& text_node, Utf16View const& text,
-    Unicode::Segmenter& grapheme_segmenter, bool should_wrap_lines, bool should_respect_linebreaks)
+    Unicode::Segmenter& grapheme_segmenter, Unicode::Segmenter& line_segmenter, CSS::WordBreak word_break,
+    bool should_wrap_lines, bool should_respect_linebreaks)
     : m_should_wrap_lines(should_wrap_lines)
     , m_should_respect_linebreaks(should_respect_linebreaks)
     , m_view(text)
     , m_font_cascade_list(text_node.computed_values().font_list())
     , m_grapheme_segmenter(grapheme_segmenter)
+    , m_line_segmenter(line_segmenter)
+    , m_word_break(word_break)
 {
     m_should_collapse_whitespace = first_is_one_of(text_node.computed_values().white_space_collapse(), CSS::WhiteSpaceCollapse::Collapse, CSS::WhiteSpaceCollapse::PreserveBreaks);
 }
@@ -531,18 +662,104 @@ TextNode::Chunk TextNode::ChunkIterator::create_empty_chunk()
     };
 }
 
-Gfx::Font const& TextNode::ChunkIterator::font_for_space(size_t at_index) const
+bool TextNode::ChunkIterator::is_at_line_break_opportunity() const
 {
+    auto has_break_all_class = [](u32 code_point) {
+        return first_is_one_of(Unicode::line_break_class(code_point),
+            Unicode::LineBreakClass::Alphabetic,
+            Unicode::LineBreakClass::Numeric,
+            Unicode::LineBreakClass::ComplexContext,
+            Unicode::LineBreakClass::Ideographic);
+    };
+
+    auto has_keep_all_class = [](u32 code_point) {
+        return first_is_one_of(Unicode::line_break_class(code_point),
+            Unicode::LineBreakClass::Alphabetic,
+            Unicode::LineBreakClass::Numeric,
+            Unicode::LineBreakClass::Ambiguous,
+            Unicode::LineBreakClass::Ideographic);
+    };
+
+    auto get_previous_code_point = [this]() -> Optional<u32> {
+        if (m_current_index == 0)
+            return {};
+        size_t current_index = m_current_index;
+        auto previous_code_point = m_view.previous_code_point_at(current_index);
+        while (Unicode::line_break_class(previous_code_point) == Unicode::LineBreakClass::CombiningMark && current_index > 0)
+            previous_code_point = m_view.previous_code_point_at(current_index);
+        return previous_code_point;
+    };
+
+    if (!m_should_wrap_lines)
+        return false;
+
+    auto is_at_line_segmenter_boundary = [this]() {
+        auto boundary = m_line_segmenter.next_boundary(m_current_index, Unicode::Segmenter::Inclusive::Yes);
+        return boundary.has_value() && boundary.value() == m_current_index;
+    };
+
+    // https://drafts.csswg.org/css-text-4/#word-break-property
+    // This property specifies soft wrap opportunities between and within “words”, i.e. where it is “normal” and
+    // permissible to break lines of text. It focuses on breaks between letters, and does not define whether and how
+    // soft wrap opportunities are created by white space and other space separators (though auto-phrase may suppress
+    // some), nor around punctuation.
+    switch (m_word_break) {
+    case CSS::WordBreak::Normal:
+        // https://drafts.csswg.org/css-text-4/#valdef-word-break-normal
+        // Words break according to their customary rules, as described above. Korean, which commonly exhibits two
+        // different behaviors, allows breaks between any two consecutive Hangul/Hanja. For Ethiopic, which also
+        // exhibits two different behaviors, such breaks within words are not allowed.
+    case CSS::WordBreak::BreakWord:
+        // https://drafts.csswg.org/css-text-4/#valdef-word-break-break-word
+        // For compatibility with legacy content, the word-break property also supports a deprecated break-word
+        // keyword. When specified, this has the same effect as word-break: normal and overflow-wrap: anywhere,
+        // regardless of the actual value of the overflow-wrap property.
+        return is_at_line_segmenter_boundary();
+    case CSS::WordBreak::BreakAll: {
+        // https://drafts.csswg.org/css-text-4/#valdef-word-break-break-all
+        // Breaking is allowed within “words”: specifically, in addition to soft wrap opportunities allowed for normal,
+        // any typographic letter units (and any typographic character units resolving to the NU (“numeric”),
+        // AL (“alphabetic”), or SA (“Southeast Asian”) line breaking classes [UAX14]) are instead treated as ID
+        // (“ideographic characters”) for the purpose of line-breaking. Hyphenation is not applied.
+        if (m_current_index >= m_view.length_in_code_units())
+            return false;
+        auto previous_code_point = get_previous_code_point();
+        if (previous_code_point.has_value() && has_break_all_class(*previous_code_point) && has_break_all_class(m_view.code_point_at(m_current_index)))
+            return true;
+        return is_at_line_segmenter_boundary();
+    }
+    case CSS::WordBreak::KeepAll: {
+        // https://drafts.csswg.org/css-text-4/#valdef-word-break-keep-all
+        // Breaking is forbidden within “words”: implicit soft wrap opportunities between typographic letter units
+        // (or other typographic character units belonging to the NU, AL, AI, or ID Unicode line breaking classes [UAX14])
+        // are suppressed, i.e. breaks are prohibited between pairs of such characters (regardless of line-break
+        // settings other than anywhere) except where opportunities exist due to §6.1.1.1 Lexical Word Breaking.
+        // Otherwise this option is equivalent to normal. In this style, sequences of CJK characters do not break.
+        if (m_current_index >= m_view.length_in_code_units())
+            return false;
+        auto previous_code_point = get_previous_code_point();
+        if (previous_code_point.has_value() && has_keep_all_class(*previous_code_point) && has_keep_all_class(m_view.code_point_at(m_current_index)))
+            return false;
+        return is_at_line_segmenter_boundary();
+    }
+    }
+    VERIFY_NOT_REACHED();
+}
+
+Gfx::Font const& TextNode::ChunkIterator::font_for_space(size_t at_index, u32 space_code_point) const
+{
+    auto has_glyph = [&](Gfx::Font const& font) { return font.contains_glyph(space_code_point); };
+
     // 1. Prefer the last non-whitespace font in this node/run.
-    if (m_last_non_whitespace_font && !m_last_non_whitespace_font->is_emoji_font())
+    if (m_last_non_whitespace_font && !m_last_non_whitespace_font->is_emoji_font() && has_glyph(*m_last_non_whitespace_font))
         return *m_last_non_whitespace_font;
 
     // 2. Look ahead to the next non-space to infer the base font of this run.
     for (size_t i = at_index; i < m_view.length_in_code_units();) {
         auto cp = m_view.code_point_at(i);
         if (!is_interword_space(cp) && cp != '\t' && cp != '\n') {
-            auto const& font = m_font_cascade_list.font_for_code_point(cp);
-            if (!font.is_emoji_font())
+            auto const& font = m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
+            if (!font.is_emoji_font() && has_glyph(font))
                 return font;
             // Text is coming from an emoji face; we'll fall back to (3).
             break;
@@ -550,8 +767,8 @@ Gfx::Font const& TextNode::ChunkIterator::font_for_space(size_t at_index) const
         i = m_grapheme_segmenter.next_boundary(i).value_or(m_view.length_in_code_units());
     }
 
-    // 3. No text around (leading/trailing/all spaces) — pick the first *text* face in the cascade.
-    return m_font_cascade_list.first_text_face();
+    // 3. No text around (leading/trailing/all spaces) — pick a font with the glyph from the cascade.
+    return m_font_cascade_list.font_for_code_point(space_code_point, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
 }
 
 Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
@@ -572,12 +789,13 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
     };
 
     auto code_point = current_code_point();
+    auto can_break_at_current_position = is_at_line_break_opportunity();
     auto start_of_chunk = m_current_index;
 
     auto const& expected_font_for = [&](u32 cp) -> Gfx::Font const& {
         return is_interword_space(cp)
-            ? font_for_space(m_current_index)
-            : m_font_cascade_list.font_for_code_point(cp);
+            ? font_for_space(m_current_index, cp)
+            : m_font_cascade_list.font_for_code_point(cp, Gfx::FontCascadeList::TriggerPendingLoads::Yes);
     };
 
     auto const& font = expected_font_for(current_code_point());
@@ -589,31 +807,32 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
         code_point = current_code_point();
 
         if (code_point == '\t') {
-            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type); result.has_value())
+            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, false, font, text_type); result.has_value())
                 return result.release_value();
 
             broken_on_tab = true;
             // consume any consecutive tabs
             while (m_current_index < m_view.length_in_code_units() && current_code_point() == '\t')
                 m_current_index = next_grapheme_boundary();
+            can_break_at_current_position = is_at_line_break_opportunity();
         }
 
         auto const& expected_font = expected_font_for(code_point);
 
         if (&font != &expected_font) {
-            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type); result.has_value())
+            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, can_break_at_current_position, font, text_type); result.has_value())
                 return result.release_value();
         }
 
         if (m_should_respect_linebreaks && code_point == '\n') {
             // Newline encountered, and we're supposed to preserve them.
             // If we have accumulated some code points in the current chunk, commit them now and continue with the newline next time.
-            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type); result.has_value())
+            if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, false, font, text_type); result.has_value())
                 return result.release_value();
 
             // Otherwise, commit the newline!
             m_current_index = next_grapheme_boundary();
-            auto result = try_commit_chunk(start_of_chunk, m_current_index, true, broken_on_tab, font, text_type);
+            auto result = try_commit_chunk(start_of_chunk, m_current_index, true, broken_on_tab, false, font, text_type);
             VERIFY(result.has_value());
             return result.release_value();
         }
@@ -621,49 +840,58 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::next_without_peek()
         // If both this code point and the previous code point are collapsible, skip code points until we're at a non-
         // collapsible code point.
         if (is_collapsible(code_point) && m_current_index > 0 && is_collapsible(m_view.code_point_at(m_current_index - 1))) {
-            auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type);
+            auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, false, font, text_type);
 
             while (m_current_index < m_view.length_in_code_units() && is_collapsible(current_code_point()))
                 m_current_index = next_grapheme_boundary();
 
             if (result.has_value())
                 return result.release_value();
+
+            return next_without_peek();
         }
 
         if (m_should_wrap_lines) {
             if (text_type != text_type_for_code_point(code_point)) {
-                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type); result.has_value())
+                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, can_break_at_current_position, font, text_type); result.has_value())
                     return result.release_value();
             }
 
             if (is_ascii_space(code_point)) {
                 // Whitespace encountered, and we're allowed to break on whitespace.
                 // If we have accumulated some code points in the current chunk, commit them now and continue with the whitespace next time.
-                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, font, text_type); result.has_value())
+                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, false, font, text_type); result.has_value())
                     return result.release_value();
 
                 // Otherwise, commit the whitespace!
                 m_current_index = next_grapheme_boundary();
-                auto const& space_font = font_for_space(m_current_index);
-                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, space_font, text_type); result.has_value())
+                can_break_at_current_position = is_at_line_break_opportunity();
+                auto const& space_font = font_for_space(m_current_index, code_point);
+                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, false, space_font, text_type); result.has_value())
                     return result.release_value();
                 continue;
+            }
+
+            if (can_break_at_current_position) {
+                if (auto result = try_commit_chunk(start_of_chunk, m_current_index, false, broken_on_tab, true, font, text_type); result.has_value())
+                    return result.release_value();
             }
         }
 
         m_current_index = next_grapheme_boundary();
+        can_break_at_current_position = is_at_line_break_opportunity();
     }
 
     if (start_of_chunk != m_view.length_in_code_units()) {
         // Try to output whatever's left at the end of the text node.
-        if (auto result = try_commit_chunk(start_of_chunk, m_view.length_in_code_units(), false, broken_on_tab, font, text_type); result.has_value())
+        if (auto result = try_commit_chunk(start_of_chunk, m_view.length_in_code_units(), false, broken_on_tab, false, font, text_type); result.has_value())
             return result.release_value();
     }
 
     return {};
 }
 
-Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start, size_t end, bool has_breaking_newline, bool has_breaking_tab, Gfx::Font const& font, Gfx::GlyphRun::TextType text_type) const
+Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start, size_t end, bool has_breaking_newline, bool has_breaking_tab, bool can_break_after, Gfx::Font const& font, Gfx::GlyphRun::TextType text_type) const
 {
     if (auto length_in_code_units = end - start; length_in_code_units > 0) {
         auto chunk_view = m_view.substring_view(start, length_in_code_units);
@@ -678,6 +906,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start
             .has_breaking_newline = has_breaking_newline,
             .has_breaking_tab = has_breaking_tab,
             .is_all_whitespace = is_all_whitespace,
+            .can_break_after = can_break_after,
             .text_type = text_type,
         };
     }
@@ -685,7 +914,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(size_t start
     return {};
 }
 
-GC::Ptr<Painting::Paintable> TextNode::create_paintable() const
+RefPtr<Painting::Paintable> TextNode::create_paintable() const
 {
     return Painting::TextPaintable::create(*this);
 }

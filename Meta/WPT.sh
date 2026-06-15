@@ -5,7 +5,7 @@ set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # shellcheck source=/dev/null
-. "${DIR}/shell_include.sh"
+. "${DIR}/Utils/shell_include.sh"
 
 ensure_ladybird_source_dir
 
@@ -86,6 +86,7 @@ WPT_ARGS=(
     "--install-webdriver"
     "--webdriver-arg=--force-cpu-painting"
     "--webdriver-arg=--default-time-zone=UTC"
+    "--webdriver-arg=--expose-experimental-interfaces"
     "--no-pause-after-test"
     "--install-fonts"
     "${EXTRA_WPT_ARGS[@]}"

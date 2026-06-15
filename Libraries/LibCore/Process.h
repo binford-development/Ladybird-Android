@@ -12,6 +12,7 @@
 #include <AK/ByteString.h>
 #include <AK/Forward.h>
 #include <AK/String.h>
+#include <LibCore/Export.h>
 #include <LibCore/File.h>
 
 namespace Core {
@@ -40,13 +41,15 @@ struct ProcessSpawnOptions {
     StringView name {};
     ByteString executable {};
     bool search_for_executable_in_path { false };
+    // On supported platforms, ask the kernel to terminate this process when its parent dies.
+    bool die_with_parent { false };
     Vector<ByteString> const& arguments {};
 
     using FileActionType = Variant<FileAction::OpenFile, FileAction::CloseFile, FileAction::DupFd>;
     Vector<FileActionType> file_actions {};
 };
 
-class Process {
+class CORE_API Process {
     AK_MAKE_NONCOPYABLE(Process);
 
 public:
@@ -61,6 +64,8 @@ public:
     static ErrorOr<Process> spawn(StringView path, ReadonlySpan<StringView> arguments);
 
     static ErrorOr<String> get_name();
+
+    [[noreturn]] static void terminate_immediately(int status);
 
     static void wait_for_debugger_and_break();
     static ErrorOr<bool> is_being_debugged();

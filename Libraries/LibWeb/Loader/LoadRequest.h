@@ -10,6 +10,7 @@
 #include <AK/Time.h>
 #include <LibCore/ElapsedTimer.h>
 #include <LibHTTP/Cache/CacheMode.h>
+#include <LibHTTP/Cookie/IncludeCredentials.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
@@ -38,11 +39,20 @@ public:
     HTTP::CacheMode cache_mode() const { return m_cache_mode; }
     void set_cache_mode(HTTP::CacheMode cache_mode) { m_cache_mode = cache_mode; }
 
-    bool store_set_cookie_headers() const { return m_store_set_cookie_headers; }
-    void set_store_set_cookie_headers(bool store_set_cookie_headers) { m_store_set_cookie_headers = store_set_cookie_headers; }
+    HTTP::Cookie::IncludeCredentials include_credentials() const { return m_include_credentials; }
+    void set_include_credentials(HTTP::Cookie::IncludeCredentials include_credentials) { m_include_credentials = include_credentials; }
 
     Optional<Fetch::Infrastructure::Request::InitiatorType> const& initiator_type() const { return m_initiator_type; }
     void set_initiator_type(Optional<Fetch::Infrastructure::Request::InitiatorType> initiator_type) { m_initiator_type = move(initiator_type); }
+
+    Optional<Fetch::Infrastructure::Request::Destination> const& destination() const { return m_destination; }
+    void set_destination(Optional<Fetch::Infrastructure::Request::Destination> destination) { m_destination = move(destination); }
+
+    Fetch::Infrastructure::Request::Mode request_mode() const { return m_request_mode; }
+    void set_request_mode(Fetch::Infrastructure::Request::Mode request_mode) { m_request_mode = request_mode; }
+
+    Optional<URL::URL> const& source_url() const { return m_source_url; }
+    void set_source_url(URL::URL source_url) { m_source_url = move(source_url); }
 
     void start_timer() { m_load_timer.start(); }
     AK::Duration load_time() const { return m_load_timer.elapsed_time(); }
@@ -60,8 +70,11 @@ private:
     Core::ElapsedTimer m_load_timer;
     GC::Root<Page> m_page;
     HTTP::CacheMode m_cache_mode { HTTP::CacheMode::Default };
-    bool m_store_set_cookie_headers { true };
+    HTTP::Cookie::IncludeCredentials m_include_credentials { HTTP::Cookie::IncludeCredentials::Yes };
     Optional<Fetch::Infrastructure::Request::InitiatorType> m_initiator_type;
+    Optional<Fetch::Infrastructure::Request::Destination> m_destination;
+    Fetch::Infrastructure::Request::Mode m_request_mode { Fetch::Infrastructure::Request::Mode::NoCORS };
+    Optional<URL::URL> m_source_url;
 };
 
 }

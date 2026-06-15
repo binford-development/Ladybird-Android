@@ -7,6 +7,7 @@
 #include <AK/Base64.h>
 #include <AK/FlyString.h>
 #include <AK/HashMap.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/Vector.h>
 #include <LibCrypto/Hash/SHA2.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/DirectiveOperations.h>
@@ -24,6 +25,7 @@
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/SRI/SRI.h>
 #include <LibWeb/SVG/SVGElement.h>
+#include <LibWeb/SVG/SVGScriptElement.h>
 
 namespace Web::ContentSecurityPolicy::Directives {
 
@@ -31,55 +33,59 @@ namespace Web::ContentSecurityPolicy::Directives {
 // Will return an ordered set of the fallback directives for a specific directive.
 // The returned ordered set is sorted from most relevant to least relevant and it includes the effective directive
 // itself.
-static HashMap<StringView, Vector<StringView>> fetch_directive_fallback_list {
-    // "script-src-elem"
-    //      1. Return << "script-src-elem", "script-src", "default-src" >>.
-    { "script-src-elem"sv, { "script-src-elem"sv, "script-src"sv, "default-src"sv } },
+static auto const& fetch_directive_fallback_list()
+{
+    static NeverDestroyed<HashMap<StringView, Vector<StringView>>> list { HashMap<StringView, Vector<StringView>> {
+        // "script-src-elem"
+        //      1. Return << "script-src-elem", "script-src", "default-src" >>.
+        { "script-src-elem"sv, { "script-src-elem"sv, "script-src"sv, "default-src"sv } },
 
-    // "script-src-attr"
-    //      1. Return << "script-src-attr", "script-src", "default-src" >>.
-    { "script-src-attr"sv, { "script-src-attr"sv, "script-src"sv, "default-src"sv } },
+        // "script-src-attr"
+        //      1. Return << "script-src-attr", "script-src", "default-src" >>.
+        { "script-src-attr"sv, { "script-src-attr"sv, "script-src"sv, "default-src"sv } },
 
-    // "style-src-elem"
-    //      1. Return << "style-src-elem", "style-src", "default-src" >>.
-    { "style-src-elem"sv, { "style-src-elem"sv, "style-src"sv, "default-src"sv } },
+        // "style-src-elem"
+        //      1. Return << "style-src-elem", "style-src", "default-src" >>.
+        { "style-src-elem"sv, { "style-src-elem"sv, "style-src"sv, "default-src"sv } },
 
-    // "style-src-attr"
-    //      1. Return << "style-src-attr", "style-src", "default-src" >>.
-    { "style-src-attr"sv, { "style-src-attr"sv, "style-src"sv, "default-src"sv } },
+        // "style-src-attr"
+        //      1. Return << "style-src-attr", "style-src", "default-src" >>.
+        { "style-src-attr"sv, { "style-src-attr"sv, "style-src"sv, "default-src"sv } },
 
-    // "worker-src"
-    //      1. Return << "worker-src", "child-src", "script-src", "default-src" >>.
-    { "worker-src"sv, { "worker-src"sv, "child-src"sv, "script-src"sv, "default-src"sv } },
+        // "worker-src"
+        //      1. Return << "worker-src", "child-src", "script-src", "default-src" >>.
+        { "worker-src"sv, { "worker-src"sv, "child-src"sv, "script-src"sv, "default-src"sv } },
 
-    // "connect-src"
-    //      1. Return << "connect-src", "default-src" >>.
-    { "connect-src"sv, { "connect-src"sv, "default-src"sv } },
+        // "connect-src"
+        //      1. Return << "connect-src", "default-src" >>.
+        { "connect-src"sv, { "connect-src"sv, "default-src"sv } },
 
-    // "manifest-src"
-    //      1. Return << "manifest-src", "default-src" >>.
-    { "manifest-src"sv, { "manifest-src"sv, "default-src"sv } },
+        // "manifest-src"
+        //      1. Return << "manifest-src", "default-src" >>.
+        { "manifest-src"sv, { "manifest-src"sv, "default-src"sv } },
 
-    // "object-src"
-    //      1. Return << "object-src", "default-src" >>.
-    { "object-src"sv, { "object-src"sv, "default-src"sv } },
+        // "object-src"
+        //      1. Return << "object-src", "default-src" >>.
+        { "object-src"sv, { "object-src"sv, "default-src"sv } },
 
-    // "frame-src"
-    //      1. Return << "frame-src", "child-src", "default-src" >>.
-    { "frame-src"sv, { "frame-src"sv, "child-src"sv, "default-src"sv } },
+        // "frame-src"
+        //      1. Return << "frame-src", "child-src", "default-src" >>.
+        { "frame-src"sv, { "frame-src"sv, "child-src"sv, "default-src"sv } },
 
-    // "media-src"
-    //      1. Return << "media-src", "default-src" >>.
-    { "media-src"sv, { "media-src"sv, "default-src"sv } },
+        // "media-src"
+        //      1. Return << "media-src", "default-src" >>.
+        { "media-src"sv, { "media-src"sv, "default-src"sv } },
 
-    // "font-src"
-    //      1. Return << "font-src", "default-src" >>.
-    { "font-src"sv, { "font-src"sv, "default-src"sv } },
+        // "font-src"
+        //      1. Return << "font-src", "default-src" >>.
+        { "font-src"sv, { "font-src"sv, "default-src"sv } },
 
-    // "img-src"
-    //      1. Return << "img-src", "default-src" >>.
-    { "img-src"sv, { "img-src"sv, "default-src"sv } },
-};
+        // "img-src"
+        //      1. Return << "img-src", "default-src" >>.
+        { "img-src"sv, { "img-src"sv, "default-src"sv } },
+    } };
+    return *list;
+}
 
 // https://w3c.github.io/webappsec-csp/#effective-directive-for-a-request
 Optional<FlyString> get_the_effective_directive_for_request(GC::Ref<Fetch::Infrastructure::Request const> request)
@@ -97,6 +103,16 @@ Optional<FlyString> get_the_effective_directive_for_request(GC::Ref<Fetch::Infra
         return Names::ConnectSrc;
 
     switch (request->destination().value()) {
+    // https://html.spec.whatwg.org/multipage/browsing-the-web.html#process-a-navigate-fetch
+    // destination
+    //     "document" (NOTE: The destination is updated below when navigable has a container.)
+    // If navigable's container is non-null:
+    //     2. Set request's destination to navigable's container's local name.
+    // AD-HOC: CSP's effective directive algorithm does not have a "document" case, but falling through to connect-src
+    //         applies fetch directives to top-level document navigations. Treat these navigation requests as not having
+    //         a fetch directive.
+    case Fetch::Infrastructure::Request::Destination::Document:
+        return OptionalNone {};
     // "manifest"
     //      1. Return manifest-src.
     case Fetch::Infrastructure::Request::Destination::Manifest:
@@ -175,8 +191,8 @@ Vector<StringView> get_fetch_directive_fallback_list(Optional<FlyString> directi
     if (!directive_name.has_value())
         return {};
 
-    auto list_iterator = fetch_directive_fallback_list.find(directive_name.value());
-    if (list_iterator == fetch_directive_fallback_list.end())
+    auto list_iterator = fetch_directive_fallback_list().find(directive_name.value());
+    if (list_iterator == fetch_directive_fallback_list().end())
         return {};
 
     return list_iterator->value;
@@ -926,8 +942,6 @@ MatchResult does_element_match_source_list_for_type_and_source(GC::Ptr<DOM::Elem
     // 5. If type is "script" or "style", or unsafe-hashes flag is true:
     // NOTE: Hashes apply to inline script and inline style. If the "'unsafe-hashes'" source expression is present,
     //       they will also apply to event handlers, style attributes and javascript: navigations.
-    // SPEC ISSUE 8:  This should handle 'strict-dynamic' for dynamically inserted inline scripts.
-    //                [Issue #w3c/webappsec-csp#426] (https://github.com/w3c/webappsec-csp/issues/426)
     if (type == Directive::InlineType::Script || type == Directive::InlineType::Style || unsafe_hashes_flag) {
         // 1. Set source to the result of executing UTF-8 encode on the result of executing JavaScript string
         //    converting on source.
@@ -938,11 +952,25 @@ MatchResult does_element_match_source_list_for_type_and_source(GC::Ptr<DOM::Elem
 
         // 2. For each expression of list:
         for (auto const& expression : source_list) {
-            // 1. If expression matches the hash-source grammar:
+            // 1. If expression is the "'strict-dynamic'" keyword-source:
+            if (expression.equals_ignoring_ascii_case(KeywordSources::StrictDynamic)) {
+                // 1. If type is "script", and element is not parser-inserted, return "Matches".
+                if (type == Directive::InlineType::Script && element) {
+                    if (auto const* html_script_element = as_if<HTML::HTMLScriptElement>(element.ptr())) {
+                        if (!html_script_element->is_parser_inserted())
+                            return MatchResult::Matches;
+                    } else if (auto const* svg_script_element = as_if<SVG::SVGScriptElement>(element.ptr())) {
+                        if (!svg_script_element->is_parser_inserted())
+                            return MatchResult::Matches;
+                    }
+                }
+            }
+
+            // 2. If expression matches the hash-source grammar:
             auto hash_source_parse_result = parse_source_expression(Production::HashSource, expression);
             if (hash_source_parse_result.has_value()) {
                 // 1. Let algorithm be null.
-                StringView algorithm;
+                Optional<StringView> algorithm;
 
                 // 2. If expression’s hash-algorithm part is an ASCII case-insensitive match for "sha256", set
                 //    algorithm to SHA-256.
@@ -963,20 +991,20 @@ MatchResult does_element_match_source_list_for_type_and_source(GC::Ptr<DOM::Elem
                     algorithm = "SHA-512"sv;
 
                 // 5. If algorithm is not null:
-                if (!algorithm.is_null()) {
+                if (algorithm.has_value()) {
                     // 1. Let actual be the result of base64 encoding the result of applying algorithm to source.
                     auto apply_algorithm_to_source = [&] {
-                        if (algorithm == "SHA-256"sv) {
+                        if (*algorithm == "SHA-256"sv) {
                             auto result = ::Crypto::Hash::SHA256::hash(converted_source_bytes);
                             return MUST(encode_base64(result.bytes()));
                         }
 
-                        if (algorithm == "SHA-384"sv) {
+                        if (*algorithm == "SHA-384"sv) {
                             auto result = ::Crypto::Hash::SHA384::hash(converted_source_bytes);
                             return MUST(encode_base64(result.bytes()));
                         }
 
-                        if (algorithm == "SHA-512"sv) {
+                        if (*algorithm == "SHA-512"sv) {
                             auto result = ::Crypto::Hash::SHA512::hash(converted_source_bytes);
                             return MUST(encode_base64(result.bytes()));
                         }

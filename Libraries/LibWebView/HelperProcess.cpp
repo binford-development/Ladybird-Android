@@ -8,6 +8,7 @@
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/CompositorClient.h>
 #include <LibWebView/HelperProcess.h>
 #include <LibWebView/Utilities.h>
 
@@ -32,7 +33,7 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
         });
     }
 
-    if (browser_options.debug_helper_process == process_type)
+    if (browser_options.debug_helper_processes.contains_slow(process_type))
         arguments.append("--wait-for-debugger"sv);
 
     for (auto [i, path] : enumerate(candidate_server_paths)) {
@@ -55,7 +56,7 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
             if constexpr (requires { client->set_pid(pid_t {}); })
                 client->set_pid(process.pid());
 
-            if constexpr (requires { client->transport().set_peer_pid(0); } && !IsSame<ClientType, Web::HTML::WebWorkerClient>) {
+            if constexpr (requires { client->transport().set_peer_pid(0); } && !IsSame<ClientType, WebWorkerClient>) {
                 auto response = client->template send_sync<typename ClientType::InitTransport>(Core::System::getpid());
                 client->transport().set_peer_pid(response->peer_pid());
             }
@@ -81,21 +82,12 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
     VERIFY_NOT_REACHED();
 }
 
-template<typename... ClientArguments>
-static ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process_impl(
-    IPC::File image_decoder_socket,
-    Optional<IPC::File> request_server_socket,
-    ClientArguments&&... client_arguments)
+ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(u64 initial_page_id)
 {
     auto const& browser_options = WebView::Application::browser_options();
     auto const& web_content_options = WebView::Application::web_content_options();
 
-    Vector<ByteString> arguments {
-        "--command-line"sv,
-        web_content_options.command_line.to_byte_string(),
-        "--executable-path"sv,
-        web_content_options.executable_path.to_byte_string(),
-    };
+    Vector<ByteString> arguments;
 
     if (browser_options.headless_mode.has_value())
         arguments.append("--headless"sv);
@@ -114,6 +106,8 @@ static ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_proc
         arguments.append("--enable-idl-tracing"sv);
     if (web_content_options.enable_http_memory_cache == WebView::EnableMemoryHTTPCache::Yes)
         arguments.append("--enable-http-memory-cache"sv);
+    if (web_content_options.expose_experimental_interfaces == WebView::ExposeExperimentalInterfaces::Yes)
+        arguments.append("--expose-experimental-interfaces"sv);
     if (web_content_options.expose_internals_object == WebView::ExposeInternalsObject::Yes)
         arguments.append("--expose-internals-object"sv);
     if (web_content_options.force_cpu_painting == WebView::ForceCPUPainting::Yes)
@@ -124,6 +118,14 @@ static ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_proc
         arguments.append("--collect-garbage-on-every-allocation"sv);
     if (web_content_options.paint_viewport_scrollbars == PaintViewportScrollbars::No)
         arguments.append("--disable-scrollbar-painting"sv);
+    if (web_content_options.enable_async_scrolling == EnableAsyncScrolling::No)
+        arguments.append("--disable-async-scrolling"sv);
+    if (web_content_options.file_scheme_urls_have_tuple_origins == FileSchemeUrlsHaveTupleOrigins::Yes)
+        arguments.append("--tuple-file-origins"sv);
+    if (web_content_options.report_session_history_updates_in_test_mode == ReportSessionHistoryUpdatesInTestMode::Yes)
+        arguments.append("--report-session-history-updates-in-test-mode"sv);
+    if (browser_options.enable_sandbox == EnableSandbox::Yes)
+        arguments.append("--enable-sandbox"sv);
 
     if (auto const maybe_echo_server_port = web_content_options.echo_server_port; maybe_echo_server_port.has_value()) {
         arguments.append("--echo-server-port"sv);
@@ -134,40 +136,25 @@ static ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_proc
         arguments.append("--default-time-zone");
         arguments.append(web_content_options.default_time_zone.value());
     }
+    if (web_content_options.style_invalidation_counter_dump_interval.has_value()) {
+        arguments.append("--dump-style-invalidation-counters"sv);
+        arguments.append(ByteString::number(*web_content_options.style_invalidation_counter_dump_interval));
+    }
 
     if (auto server = mach_server_name(); server.has_value()) {
         arguments.append("--mach-server-name"sv);
         arguments.append(server.value());
     }
-    if (request_server_socket.has_value()) {
-        arguments.append("--request-server-socket"sv);
-        arguments.append(ByteString::number(request_server_socket->fd()));
-    }
-
-    arguments.append("--image-decoder-socket"sv);
-    arguments.append(ByteString::number(image_decoder_socket.fd()));
-
-    return launch_server_process<WebView::WebContentClient>("WebContent"sv, move(arguments), forward<ClientArguments>(client_arguments)...);
-}
-
-ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_web_content_process(
-    WebView::ViewImplementation& view,
-    IPC::File image_decoder_socket,
-    Optional<IPC::File> request_server_socket)
-{
-    return launch_web_content_process_impl(move(image_decoder_socket), move(request_server_socket), view);
-}
-
-ErrorOr<NonnullRefPtr<WebView::WebContentClient>> launch_spare_web_content_process(
-    IPC::File image_decoder_socket,
-    Optional<IPC::File> request_server_socket)
-{
-    return launch_web_content_process_impl(move(image_decoder_socket), move(request_server_socket));
+    return launch_server_process<WebView::WebContentClient>("WebContent"sv, move(arguments), initial_page_id);
 }
 
 ErrorOr<NonnullRefPtr<ImageDecoderClient::Client>> launch_image_decoder_process()
 {
+    auto const& browser_options = WebView::Application::browser_options();
+
     Vector<ByteString> arguments;
+    if (browser_options.enable_sandbox == EnableSandbox::Yes)
+        arguments.append("--enable-sandbox"sv);
     if (auto server = mach_server_name(); server.has_value()) {
         arguments.append("--mach-server-name"sv);
         arguments.append(server.value());
@@ -176,22 +163,43 @@ ErrorOr<NonnullRefPtr<ImageDecoderClient::Client>> launch_image_decoder_process(
     return launch_server_process<ImageDecoderClient::Client>("ImageDecoder"sv, arguments);
 }
 
-ErrorOr<NonnullRefPtr<Web::HTML::WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType type)
+ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process()
 {
+    auto const& browser_options = WebView::Application::browser_options();
+    auto const& web_content_options = WebView::Application::web_content_options();
+
+    Vector<ByteString> arguments;
+    if (browser_options.enable_sandbox == EnableSandbox::Yes)
+        arguments.append("--enable-sandbox"sv);
+    if (web_content_options.force_cpu_painting == WebView::ForceCPUPainting::Yes)
+        arguments.append("--force-cpu-painting"sv);
+    if (web_content_options.force_fontconfig == WebView::ForceFontconfig::Yes)
+        arguments.append("--force-fontconfig"sv);
+    if (web_content_options.enable_async_scrolling == EnableAsyncScrolling::No)
+        arguments.append("--disable-async-scrolling"sv);
+    if (auto server = mach_server_name(); server.has_value()) {
+        arguments.append("--mach-server-name"sv);
+        arguments.append(server.value());
+    }
+
+    return launch_server_process<WebView::CompositorClient>("Compositor"sv, move(arguments));
+}
+
+ErrorOr<NonnullRefPtr<WebWorkerClient>> launch_web_worker_process(Web::Bindings::AgentType type, Web::HTML::WorkerAgentId agent_id)
+{
+    auto const& browser_options = WebView::Application::browser_options();
     auto const& web_content_options = WebView::Application::web_content_options();
 
     Vector<ByteString> arguments;
 
+    if (browser_options.enable_sandbox == EnableSandbox::Yes)
+        arguments.append("--enable-sandbox"sv);
+    if (web_content_options.expose_experimental_interfaces == WebView::ExposeExperimentalInterfaces::Yes)
+        arguments.append("--expose-experimental-interfaces"sv);
     if (web_content_options.enable_http_memory_cache == WebView::EnableMemoryHTTPCache::Yes)
         arguments.append("--enable-http-memory-cache"sv);
-
-    auto request_server_socket = TRY(connect_new_request_server_client());
-    arguments.append("--request-server-socket"sv);
-    arguments.append(ByteString::number(request_server_socket.fd()));
-
-    auto image_decoder_socket = TRY(connect_new_image_decoder_client());
-    arguments.append("--image-decoder-socket"sv);
-    arguments.append(ByteString::number(image_decoder_socket.fd()));
+    if (web_content_options.file_scheme_urls_have_tuple_origins == FileSchemeUrlsHaveTupleOrigins::Yes)
+        arguments.append("--tuple-file-origins"sv);
 
     arguments.append("--type"sv);
     switch (type) {
@@ -208,15 +216,23 @@ ErrorOr<NonnullRefPtr<Web::HTML::WebWorkerClient>> launch_web_worker_process(Web
         VERIFY_NOT_REACHED();
     }
 
-    return launch_server_process<Web::HTML::WebWorkerClient>("WebWorker"sv, move(arguments));
+    if (auto server = mach_server_name(); server.has_value()) {
+        arguments.append("--mach-server-name"sv);
+        arguments.append(server.value());
+    }
+
+    return launch_server_process<WebWorkerClient>("WebWorker"sv, move(arguments), agent_id);
 }
 
 ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
 {
+    auto const& browser_options = Application::browser_options();
     auto const& request_server_options = Application::request_server_options();
 
     Vector<ByteString> arguments;
 
+    if (browser_options.enable_sandbox == EnableSandbox::Yes)
+        arguments.append("--enable-sandbox"sv);
     for (auto const& certificate : request_server_options.certificates)
         arguments.append(ByteString::formatted("--certificate={}", certificate));
 
@@ -247,13 +263,16 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
 
     auto client = TRY(launch_server_process<Requests::RequestClient>("RequestServer"sv, move(arguments)));
 
-    WebView::Application::settings().dns_settings().visit(
-        [](WebView::SystemDNS) {},
-        [&](WebView::DNSOverTLS const& dns_over_tls) {
+    auto const& browsing_data_settings = Application::settings().browsing_data_settings();
+    client->async_set_disk_cache_settings(browsing_data_settings.disk_cache_settings);
+
+    Application::settings().dns_settings().visit(
+        [](SystemDNS) {},
+        [&](DNSOverTLS const& dns_over_tls) {
             dbgln("Setting DNS server to {}:{} with TLS ({} local dnssec)", dns_over_tls.server_address, dns_over_tls.port, dns_over_tls.validate_dnssec_locally ? "with" : "without");
             client->async_set_dns_server(dns_over_tls.server_address, dns_over_tls.port, true, dns_over_tls.validate_dnssec_locally);
         },
-        [&](WebView::DNSOverUDP const& dns_over_udp) {
+        [&](DNSOverUDP const& dns_over_udp) {
             dbgln("Setting DNS server to {}:{} ({} local dnssec)", dns_over_udp.server_address, dns_over_udp.port, dns_over_udp.validate_dnssec_locally ? "with" : "without");
             client->async_set_dns_server(dns_over_udp.server_address, dns_over_udp.port, false, dns_over_udp.validate_dnssec_locally);
         });
@@ -261,32 +280,24 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> launch_request_server_process()
     return client;
 }
 
-ErrorOr<IPC::File> connect_new_request_server_client()
+ErrorOr<IPC::TransportHandle> connect_new_request_server_client()
 {
-    auto new_socket = Application::request_server_client().send_sync_but_allow_failure<Messages::RequestServer::ConnectNewClient>();
-    if (!new_socket)
+    auto response = Application::request_server_client().send_sync_but_allow_failure<Messages::RequestServer::ConnectNewClient>();
+    if (!response)
         return Error::from_string_literal("Failed to connect to RequestServer");
-
-    auto socket = new_socket->take_client_socket();
-    TRY(socket.clear_close_on_exec());
-
-    return socket;
+    return response->take_handle();
 }
 
-ErrorOr<IPC::File> connect_new_image_decoder_client()
+ErrorOr<IPC::TransportHandle> connect_new_image_decoder_client()
 {
-    auto new_socket = Application::image_decoder_client().send_sync_but_allow_failure<Messages::ImageDecoderServer::ConnectNewClients>(1);
-    if (!new_socket)
+    auto response = Application::image_decoder_client().send_sync_but_allow_failure<Messages::ImageDecoderServer::ConnectNewClients>(1);
+    if (!response)
         return Error::from_string_literal("Failed to connect to ImageDecoder");
 
-    auto sockets = new_socket->take_sockets();
-    if (sockets.size() != 1)
+    auto handles = response->take_handles();
+    if (handles.size() != 1)
         return Error::from_string_literal("Failed to connect to ImageDecoder");
-
-    auto socket = sockets.take_last();
-    TRY(socket.clear_close_on_exec());
-
-    return socket;
+    return handles.take_last();
 }
 
 }

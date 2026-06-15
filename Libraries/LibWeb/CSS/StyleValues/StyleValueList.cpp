@@ -25,22 +25,20 @@ bool StyleValueList::Properties::operator==(Properties const& other) const
 
 ValueComparingNonnullRefPtr<StyleValue const> StyleValueList::absolutized(ComputationContext const& computation_context) const
 {
-    StyleValueVector absolutized_style_values;
-    absolutized_style_values.ensure_capacity(m_properties.values.size());
-
-    bool any_absolutized = false;
-
-    for (auto const& value : m_properties.values) {
-        auto absolutized_style_value = value->absolutized(computation_context);
-        if (absolutized_style_value != value)
-            any_absolutized = true;
-        absolutized_style_values.append(value->absolutized(computation_context));
+    for (size_t i = 0; i < m_properties.values.size(); ++i) {
+        auto absolutized_value = m_properties.values[i]->absolutized(computation_context);
+        if (absolutized_value != m_properties.values[i]) {
+            StyleValueVector result;
+            result.ensure_capacity(m_properties.values.size());
+            for (size_t j = 0; j < i; ++j)
+                result.append(m_properties.values[j]);
+            result.append(move(absolutized_value));
+            for (size_t j = i + 1; j < m_properties.values.size(); ++j)
+                result.append(m_properties.values[j]->absolutized(computation_context));
+            return StyleValueList::create(move(result), m_properties.separator);
+        }
     }
-
-    if (!any_absolutized)
-        return *this;
-
-    return StyleValueList::create(move(absolutized_style_values), m_properties.separator);
+    return *this;
 }
 
 void StyleValueList::serialize(StringBuilder& builder, SerializationMode mode) const
@@ -61,15 +59,22 @@ void StyleValueList::serialize(StringBuilder& builder, SerializationMode mode) c
     }
 
     auto first_value = m_properties.values.first();
-    if (all_of(m_properties.values, [&](auto const& property) { return property == first_value; }) && m_properties.separator != Separator::Comma) {
+    if (all_of(m_properties.values, [&](auto const& property) { return property == first_value; }) && m_properties.separator != Separator::Comma && m_properties.collapsible == Collapsible::Yes && !first_value->is_empty_optional()) {
         first_value->serialize(builder, mode);
         return;
     }
 
+    bool first = true;
+
     for (size_t i = 0; i < m_properties.values.size(); ++i) {
-        m_properties.values[i]->serialize(builder, mode);
-        if (i != m_properties.values.size() - 1)
+        if (m_properties.values[i]->is_empty_optional())
+            continue;
+
+        if (!first)
             builder.append(separator);
+
+        first = false;
+        m_properties.values[i]->serialize(builder, mode);
     }
 }
 
@@ -85,6 +90,8 @@ Vector<Parser::ComponentValue> StyleValueList::tokenize() const
     Vector<Parser::ComponentValue> component_values;
     bool first = true;
     for (auto const& value : m_properties.values) {
+        if (value->is_empty_optional())
+            continue;
         if (first) {
             first = false;
         } else {
@@ -99,23 +106,28 @@ Vector<Parser::ComponentValue> StyleValueList::tokenize() const
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#reify-a-transform-list
-static ErrorOr<GC::Ref<CSSStyleValue>> reify_a_transform_list(JS::Realm& realm, StyleValueVector const& values)
+static GC::Ptr<CSSStyleValue> reify_a_transform_list(JS::Realm& realm, StyleValueVector const& values)
 {
-    GC::RootVector<GC::Ref<CSSTransformComponent>> transform_components { realm.heap() };
+    GC::RootVector<GC::Ref<CSSTransformComponent>> transform_components;
     for (auto const& transform : values) {
+        auto reified_transform = transform->as_transformation().reify_a_transform_function(realm);
+
+        if (!reified_transform)
+            return nullptr;
+
         // NB: Not all transform functions are reifiable, in which case we give up reifying as a transform list.
-        transform_components.append(TRY(transform->as_transformation().reify_a_transform_function(realm)));
+        transform_components.append(reified_transform.as_nonnull());
     }
-    return CSSTransformValue::create(realm, static_cast<Vector<GC::Ref<CSSTransformComponent>>>(move(transform_components)));
+    return CSSTransformValue::create(realm, move(transform_components));
 }
 
-GC::Ref<CSSStyleValue> StyleValueList::reify(JS::Realm& realm, FlyString const& associated_property) const
+GC::Ref<CSSStyleValue> StyleValueList::reify(JS::Realm& realm, Utf16FlyString const& associated_property) const
 {
     // NB: <transform-list> is a StyleValueList that contains TransformStyleValues. If that's what we are, follow the
     //     steps for reifying that.
     if (all_of(m_properties.values, [](auto const& it) { return it->is_transformation(); })) {
-        if (auto transform_list = reify_a_transform_list(realm, m_properties.values); !transform_list.is_error())
-            return transform_list.release_value();
+        if (auto transform_list = reify_a_transform_list(realm, m_properties.values))
+            return transform_list.as_nonnull();
     }
 
     // NB: Otherwise, there isn't an equivalent CSSStyleValue for StyleValueList, so just use the default.

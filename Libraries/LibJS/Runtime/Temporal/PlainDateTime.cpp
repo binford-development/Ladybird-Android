@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/NeverDestroyed.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/Temporal/Calendar.h>
@@ -51,10 +52,18 @@ ISODateTime combine_iso_date_and_time_record(ISODate iso_date, Time const& time)
 }
 
 // nsMinInstant - nsPerDay
-static auto const DATETIME_NANOSECONDS_MIN = "-8640000086400000000000"_sbigint;
+static auto const& datetime_nanoseconds_min()
+{
+    static NeverDestroyed<Crypto::SignedBigInteger> value { "-8640000086400000000000"_sbigint };
+    return *value;
+}
 
 // nsMaxInstant + nsPerDay
-static auto const DATETIME_NANOSECONDS_MAX = "8640000086400000000000"_sbigint;
+static auto const& datetime_nanoseconds_max()
+{
+    static NeverDestroyed<Crypto::SignedBigInteger> value { "8640000086400000000000"_sbigint };
+    return *value;
+}
 
 // 5.5.4 ISODateTimeWithinLimits ( isoDateTime ), https://tc39.es/proposal-temporal/#sec-temporal-isodatetimewithinlimits
 bool iso_date_time_within_limits(ISODateTime const& iso_date_time)
@@ -66,24 +75,20 @@ bool iso_date_time_within_limits(ISODateTime const& iso_date_time)
     // 2. Let ns be ℝ(GetUTCEpochNanoseconds(isoDateTime)).
     auto nanoseconds = get_utc_epoch_nanoseconds(iso_date_time);
 
-    // 3. If ns ≤ nsMinInstant - nsPerDay, then
-    if (nanoseconds <= DATETIME_NANOSECONDS_MIN) {
-        // a. Return false.
+    // 3. If ns ≤ nsMinInstant - nsPerDay, return false.
+    if (nanoseconds <= datetime_nanoseconds_min())
         return false;
-    }
 
-    // 4. If ns ≥ nsMaxInstant + nsPerDay, then
-    if (nanoseconds >= DATETIME_NANOSECONDS_MAX) {
-        // a. Return false.
+    // 4. If ns ≥ nsMaxInstant + nsPerDay, return false.
+    if (nanoseconds >= datetime_nanoseconds_max())
         return false;
-    }
 
     // 5. Return true.
     return true;
 }
 
 // 5.5.5 InterpretTemporalDateTimeFields ( calendar, fields, overflow ), https://tc39.es/proposal-temporal/#sec-temporal-interprettemporaldatetimefields
-ThrowCompletionOr<ISODateTime> interpret_temporal_date_time_fields(VM& vm, StringView calendar, CalendarFields& fields, Overflow overflow)
+ThrowCompletionOr<ISODateTime> interpret_temporal_date_time_fields(VM& vm, String const& calendar, CalendarFields& fields, Overflow overflow)
 {
     // 1. Let isoDate be ? CalendarDateFromFields(calendar, fields, overflow).
     auto iso_date = TRY(calendar_date_from_fields(vm, calendar, fields, overflow));
@@ -101,13 +106,9 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> to_temporal_date_time(VM& vm, Value it
     // 1. If options is not present, set options to undefined.
 
     // 2. If item is an Object, then
-    if (item.is_object()) {
-        auto const& object = item.as_object();
-
+    if (auto object = item.as_if<Object>()) {
         // a. If item has an [[InitializedTemporalDateTime]] internal slot, then
-        if (is<PlainDateTime>(object)) {
-            auto const& plain_date_time = static_cast<PlainDateTime const&>(object);
-
+        if (auto const* plain_date_time = as_if<PlainDateTime>(*object)) {
             // i. Let resolvedOptions be ? GetOptionsObject(options).
             auto resolved_options = TRY(get_options_object(vm, options));
 
@@ -115,15 +116,13 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> to_temporal_date_time(VM& vm, Value it
             TRY(get_temporal_overflow_option(vm, resolved_options));
 
             // iii. Return ! CreateTemporalDateTime(item.[[ISODateTime]], item.[[Calendar]]).
-            return MUST(create_temporal_date_time(vm, plain_date_time.iso_date_time(), plain_date_time.calendar()));
+            return MUST(create_temporal_date_time(vm, plain_date_time->iso_date_time(), plain_date_time->calendar()));
         }
 
         // b. If item has an [[InitializedTemporalZonedDateTime]] internal slot, then
-        if (is<ZonedDateTime>(object)) {
-            auto const& zoned_date_time = static_cast<ZonedDateTime const&>(object);
-
+        if (auto const* zoned_date_time = as_if<ZonedDateTime>(*object)) {
             // i. Let isoDateTime be GetISODateTimeFor(item.[[TimeZone]], item.[[EpochNanoseconds]]).
-            auto iso_date_time = get_iso_date_time_for(zoned_date_time.time_zone(), zoned_date_time.epoch_nanoseconds()->big_integer());
+            auto iso_date_time = get_iso_date_time_for(zoned_date_time->time_zone(), zoned_date_time->epoch_nanoseconds()->big_integer());
 
             // ii. Let resolvedOptions be ? GetOptionsObject(options).
             auto resolved_options = TRY(get_options_object(vm, options));
@@ -132,13 +131,11 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> to_temporal_date_time(VM& vm, Value it
             TRY(get_temporal_overflow_option(vm, resolved_options));
 
             // iv. Return ! CreateTemporalDateTime(isoDateTime, item.[[Calendar]]).
-            return MUST(create_temporal_date_time(vm, iso_date_time, zoned_date_time.calendar()));
+            return MUST(create_temporal_date_time(vm, iso_date_time, zoned_date_time->calendar()));
         }
 
         // c. If item has an [[InitializedTemporalDate]] internal slot, then
-        if (is<PlainDate>(object)) {
-            auto const& plain_date = static_cast<PlainDate const&>(object);
-
+        if (auto const* plain_date = as_if<PlainDate>(*object)) {
             // i. Let resolvedOptions be ? GetOptionsObject(options).
             auto resolved_options = TRY(get_options_object(vm, options));
 
@@ -146,19 +143,19 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> to_temporal_date_time(VM& vm, Value it
             TRY(get_temporal_overflow_option(vm, resolved_options));
 
             // iii. Let isoDateTime be CombineISODateAndTimeRecord(item.[[ISODate]], MidnightTimeRecord()).
-            auto iso_date_time = combine_iso_date_and_time_record(plain_date.iso_date(), midnight_time_record());
+            auto iso_date_time = combine_iso_date_and_time_record(plain_date->iso_date(), midnight_time_record());
 
             // iv. Return ? CreateTemporalDateTime(isoDateTime, item.[[Calendar]]).
-            return TRY(create_temporal_date_time(vm, iso_date_time, plain_date.calendar()));
+            return TRY(create_temporal_date_time(vm, iso_date_time, plain_date->calendar()));
         }
 
         // d. Let calendar be ? GetTemporalCalendarIdentifierWithISODefault(item).
-        auto calendar = TRY(get_temporal_calendar_identifier_with_iso_default(vm, object));
+        auto calendar = TRY(get_temporal_calendar_identifier_with_iso_default(vm, *object));
 
         // e. Let fields be ? PrepareCalendarFields(calendar, item, « YEAR, MONTH, MONTH-CODE, DAY », « HOUR, MINUTE, SECOND, MILLISECOND, MICROSECOND, NANOSECOND », «»).
         static constexpr auto calendar_field_names = to_array({ CalendarField::Year, CalendarField::Month, CalendarField::MonthCode, CalendarField::Day });
         static constexpr auto non_calendar_field_names = to_array({ CalendarField::Hour, CalendarField::Minute, CalendarField::Second, CalendarField::Millisecond, CalendarField::Microsecond, CalendarField::Nanosecond });
-        auto fields = TRY(prepare_calendar_fields(vm, calendar, object, calendar_field_names, non_calendar_field_names, CalendarFieldList {}));
+        auto fields = TRY(prepare_calendar_fields(vm, calendar, *object, calendar_field_names, non_calendar_field_names, CalendarFieldList {}));
 
         // f. Let resolvedOptions be ? GetOptionsObject(options).
         auto resolved_options = TRY(get_options_object(vm, options));
@@ -224,11 +221,9 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> create_temporal_date_time(VM& vm, ISOD
 {
     auto& realm = *vm.current_realm();
 
-    // 1. If ISODateTimeWithinLimits(isoDateTime) is false, then
-    if (!iso_date_time_within_limits(iso_date_time)) {
-        // a. Throw a RangeError exception.
+    // 1. If ISODateTimeWithinLimits(isoDateTime) is false, throw a RangeError exception.
+    if (!iso_date_time_within_limits(iso_date_time))
         return vm.throw_completion<RangeError>(ErrorType::TemporalInvalidPlainDateTime);
-    }
 
     // 2. If newTarget is not present, set newTarget to %Temporal.PlainDateTime%.
     if (!new_target)
@@ -244,7 +239,7 @@ ThrowCompletionOr<GC::Ref<PlainDateTime>> create_temporal_date_time(VM& vm, ISOD
 }
 
 // 5.5.9 ISODateTimeToString ( isoDateTime, calendar, precision, showCalendar ), https://tc39.es/proposal-temporal/#sec-temporal-isodatetimetostring
-String iso_date_time_to_string(ISODateTime const& iso_date_time, StringView calendar, SecondsStringPrecision::Precision precision, ShowCalendar show_calendar)
+String iso_date_time_to_string(ISODateTime const& iso_date_time, String const& calendar, SecondsStringPrecision::Precision precision, ShowCalendar show_calendar)
 {
     // 1. Let yearString be PadISOYear(isoDateTime.[[ISODate]].[[Year]]).
     auto year_string = pad_iso_year(iso_date_time.iso_date.year);
@@ -300,7 +295,7 @@ ISODateTime round_iso_date_time(ISODateTime const& iso_date_time, u64 increment,
 }
 
 // 5.5.12 DifferenceISODateTime ( isoDateTime1, isoDateTime2, calendar, largestUnit ), https://tc39.es/proposal-temporal/#sec-temporal-differenceisodatetime
-InternalDuration difference_iso_date_time(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, StringView calendar, Unit largest_unit)
+InternalDuration difference_iso_date_time(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, String const& calendar, Unit largest_unit)
 {
     // 1. Assert: ISODateTimeWithinLimits(isoDateTime1) is true.
     VERIFY(iso_date_time_within_limits(iso_date_time1));
@@ -349,13 +344,11 @@ InternalDuration difference_iso_date_time(VM& vm, ISODateTime const& iso_date_ti
 }
 
 // 5.5.13 DifferencePlainDateTimeWithRounding ( isoDateTime1, isoDateTime2, calendar, largestUnit, roundingIncrement, smallestUnit, roundingMode ), https://tc39.es/proposal-temporal/#sec-temporal-differenceplaindatetimewithrounding
-ThrowCompletionOr<InternalDuration> difference_plain_date_time_with_rounding(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, StringView calendar, Unit largest_unit, u64 rounding_increment, Unit smallest_unit, RoundingMode rounding_mode)
+ThrowCompletionOr<InternalDuration> difference_plain_date_time_with_rounding(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, String const& calendar, Unit largest_unit, u64 rounding_increment, Unit smallest_unit, RoundingMode rounding_mode)
 {
-    // 1. If CompareISODateTime(isoDateTime1, isoDateTime2) = 0, then
-    if (compare_iso_date_time(iso_date_time1, iso_date_time2) == 0) {
-        // a. Return CombineDateAndTimeDuration(ZeroDateDuration(), 0).
+    // 1. If CompareISODateTime(isoDateTime1, isoDateTime2) = 0, return CombineDateAndTimeDuration(ZeroDateDuration(), 0).
+    if (compare_iso_date_time(iso_date_time1, iso_date_time2) == 0)
         return combine_date_and_time_duration(zero_date_duration(vm), TimeDuration { 0 });
-    }
 
     // 2. If ISODateTimeWithinLimits(isoDateTime1) is false or ISODateTimeWithinLimits(isoDateTime2) is false, throw a
     //    RangeError exception.
@@ -380,13 +373,11 @@ ThrowCompletionOr<InternalDuration> difference_plain_date_time_with_rounding(VM&
 }
 
 // 5.5.14 DifferencePlainDateTimeWithTotal ( isoDateTime1, isoDateTime2, calendar, unit ), https://tc39.es/proposal-temporal/#sec-temporal-differenceplaindatetimewithtotal
-ThrowCompletionOr<Crypto::BigFraction> difference_plain_date_time_with_total(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, StringView calendar, Unit unit)
+ThrowCompletionOr<Crypto::BigFraction> difference_plain_date_time_with_total(VM& vm, ISODateTime const& iso_date_time1, ISODateTime const& iso_date_time2, String const& calendar, Unit unit)
 {
-    // 1. If CompareISODateTime(isoDateTime1, isoDateTime2) = 0, then
-    if (compare_iso_date_time(iso_date_time1, iso_date_time2) == 0) {
-        // a. Return 0.
+    // 1. If CompareISODateTime(isoDateTime1, isoDateTime2) = 0, return 0.
+    if (compare_iso_date_time(iso_date_time1, iso_date_time2) == 0)
         return Crypto::BigFraction {};
-    }
 
     // 2. If ISODateTimeWithinLimits(isoDateTime1) is false or ISODateTimeWithinLimits(isoDateTime2) is false, throw a
     //    RangeError exception.
@@ -426,11 +417,9 @@ ThrowCompletionOr<GC::Ref<Duration>> difference_temporal_plain_date_time(VM& vm,
     // 4. Let settings be ? GetDifferenceSettings(operation, resolvedOptions, DATETIME, « », NANOSECOND, DAY).
     auto settings = TRY(get_difference_settings(vm, operation, resolved_options, UnitGroup::DateTime, {}, Unit::Nanosecond, Unit::Day));
 
-    // 5. If CompareISODateTime(dateTime.[[ISODateTime]], other.[[ISODateTime]]) = 0, then
-    if (compare_iso_date_time(date_time.iso_date_time(), other->iso_date_time()) == 0) {
-        // a. Return ! CreateTemporalDuration(0, 0, 0, 0, 0, 0, 0, 0, 0, 0).
+    // 5. If CompareISODateTime(dateTime.[[ISODateTime]], other.[[ISODateTime]]) = 0, return ! CreateTemporalDuration(0, 0, 0, 0, 0, 0, 0, 0, 0, 0).
+    if (compare_iso_date_time(date_time.iso_date_time(), other->iso_date_time()) == 0)
         return MUST(create_temporal_duration(vm, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
-    }
 
     // 6. Let internalDuration be ? DifferencePlainDateTimeWithRounding(dateTime.[[ISODateTime]], other.[[ISODateTime]], dateTime.[[Calendar]], settings.[[LargestUnit]], settings.[[RoundingIncrement]], settings.[[SmallestUnit]], settings.[[RoundingMode]]).
     auto internal_duration = TRY(difference_plain_date_time_with_rounding(vm, date_time.iso_date_time(), other->iso_date_time(), date_time.calendar(), settings.largest_unit, settings.rounding_increment, settings.smallest_unit, settings.rounding_mode));

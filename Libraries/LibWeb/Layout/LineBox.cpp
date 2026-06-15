@@ -7,6 +7,7 @@
 
 #include <AK/CharacterTypes.h>
 #include <AK/Utf8View.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Position.h>
 #include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/LineBox.h>
@@ -59,6 +60,24 @@ void LineBox::add_fragment(Node const& layout_node, size_t start, size_t length,
     m_block_length = max(m_block_length, content_height + border_box_top + border_box_bottom);
 }
 
+void LineBox::add_static_position_marker(Box const& box)
+{
+    m_static_position_markers.append(StaticPositionMarker {
+        .box = &box,
+        .inline_offset = m_inline_length,
+        .block_offset = 0,
+        .writing_mode = m_writing_mode,
+    });
+}
+
+void LineBox::clamp_static_position_markers_to_inline_length()
+{
+    for (auto& marker : m_static_position_markers) {
+        if (marker.inline_offset > m_inline_length)
+            marker.inline_offset = m_inline_length;
+    }
+}
+
 CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespace should_remove)
 {
     auto should_trim = [](LineBoxFragment* fragment) {
@@ -68,6 +87,7 @@ CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespac
     };
 
     CSSPixels whitespace_width = 0;
+    CSSPixels trailing_whitespace_width = 0;
     LineBoxFragment* last_fragment = nullptr;
     size_t fragment_index = m_fragments.size();
     for (;;) {
@@ -86,16 +106,23 @@ CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespac
             break;
 
         whitespace_width += last_fragment->inline_length();
+        trailing_whitespace_width += last_fragment->inline_length();
         if (should_remove == RemoveTrailingWhitespace::Yes) {
             m_inline_length -= last_fragment->inline_length();
             m_fragments.remove(fragment_index);
+            clamp_static_position_markers_to_inline_length();
         }
     }
 
     auto last_text = last_fragment->text();
-    if (last_text.is_null())
+    if (last_text.is_empty()) {
+        // No text to trim, but we may have removed whitespace-only fragments.
+        if (should_remove == RemoveTrailingWhitespace::Yes && trailing_whitespace_width > 0)
+            last_fragment->set_has_trailing_whitespace(true);
         return whitespace_width;
+    }
 
+    // Trim trailing whitespace characters from the last fragment.
     size_t last_text_length = last_text.length_in_code_units();
     while (last_text_length) {
         auto last_character = last_text.code_unit_at(--last_text_length);
@@ -103,13 +130,22 @@ CSSPixels LineBox::calculate_or_trim_trailing_whitespace(RemoveTrailingWhitespac
             break;
 
         auto const& font = last_fragment->glyph_run() ? last_fragment->glyph_run()->font() : last_fragment->layout_node().first_available_font();
-        int last_character_width = font.glyph_width(last_character);
+        CSSPixels last_character_width = CSSPixels(font.glyph_width(last_character)) + last_fragment->layout_node().computed_values().letter_spacing();
         whitespace_width += last_character_width;
+        trailing_whitespace_width += last_character_width;
         if (should_remove == RemoveTrailingWhitespace::Yes) {
             --last_fragment->m_length_in_code_units;
             last_fragment->set_inline_length(last_fragment->inline_length() - last_character_width);
             m_inline_length -= last_character_width;
+            clamp_static_position_markers_to_inline_length();
         }
+    }
+
+    // Track trimmed whitespace for selection purposes, but don't overwrite a value
+    // that was already set during line breaking (for wrapped lines).
+    if (should_remove == RemoveTrailingWhitespace::Yes
+        && (trailing_whitespace_width > 0 || !last_fragment->has_trailing_whitespace())) {
+        last_fragment->set_has_trailing_whitespace(trailing_whitespace_width > 0);
     }
 
     return whitespace_width;

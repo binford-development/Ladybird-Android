@@ -12,6 +12,7 @@
 #include <AK/JsonValue.h>
 #include <AK/Math.h>
 #include <AK/Utf8View.h>
+#include <LibCore/Timer.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
@@ -149,7 +150,7 @@ static CSSPixelPoint get_parent_offset(HTML::BrowsingContext const& browsing_con
         CSSPixels border_left_width = 0;
         CSSPixels border_top_width = 0;
 
-        if (auto* paintable_box = container_element->paintable_box()) {
+        if (auto paintable_box = container_element->paintable_box()) {
             // 7. Let borderLeftWidth be the computed border-left-width of containerElement in CSS pixels.
             border_left_width = paintable_box->computed_values().border_left().width;
 
@@ -204,7 +205,7 @@ static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_orig
             auto element = TRY(actions_options.get_element_origin(browsing_context, origin));
 
             // 3. Let x element and y element be the result of calculating the in-view center point of element.
-            auto position = in_view_center_point(element, viewport);
+            auto position = TRY(in_view_center_point(element, viewport));
 
             // 4. Let x equal x element + x offset, and y equal y element + y offset.
             return position.translated(offset);
@@ -921,6 +922,7 @@ static bool is_shifted_character(u32 code_point)
 struct KeyEvent {
     u32 code_point { 0 };
     UIEvents::KeyModifier modifiers { UIEvents::KeyModifier::Mod_None };
+    bool should_insert_text { false };
 };
 static KeyEvent key_code_to_page_event(u32 code_point, UIEvents::KeyModifier modifiers, KeyCodeData const& code)
 {
@@ -961,7 +963,11 @@ static KeyEvent key_code_to_page_event(u32 code_point, UIEvents::KeyModifier mod
     if (has_flag(modifiers, UIEvents::KeyModifier::Mod_Shift))
         code_point = code.alternate_key.value_or(code_point);
 
-    return { code_point, modifiers };
+    auto should_insert_text = code_point != 0
+        && code_point < 0xE000
+        && !(modifiers & (UIEvents::KeyModifier::Mod_Ctrl | UIEvents::KeyModifier::Mod_Alt | UIEvents::KeyModifier::Mod_Super));
+
+    return { code_point, modifiers, should_insert_text };
 }
 
 // https://w3c.github.io/webdriver/#dfn-dispatch-a-keydown-action
@@ -1017,7 +1023,7 @@ static ErrorOr<void, WebDriver::Error> dispatch_key_down_action(ActionObject::Ke
     //     keyboard in accordance with the requirements of [UI-EVENTS], and producing the following events, as appropriate,
     //     with the specified properties. This will always produce events including at least a keyDown event.
     auto event = key_code_to_page_event(raw_key, modifiers, code);
-    browsing_context.page().handle_keydown(code.code, event.modifiers, event.code_point, repeat);
+    browsing_context.page().handle_keydown(code.code, event.modifiers, event.code_point, repeat, event.should_insert_text);
 
     // 13. Return success with data null.
     return {};
@@ -1045,28 +1051,31 @@ static ErrorOr<void, WebDriver::Error> dispatch_key_up_action(ActionObject::KeyF
     //    guidelines in [UI-EVENTS].
 
     auto modifiers = global_key_state.modifiers();
+    auto clear_modifier = [](UIEvents::KeyModifier& modifiers, UIEvents::KeyModifier modifier) {
+        modifiers = static_cast<UIEvents::KeyModifier>(to_underlying(modifiers) & ~to_underlying(modifier));
+    };
 
     // 7. If key is "Alt", let source's alt property be false.
     if (key == "Alt"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Alt;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Alt);
         source.alt = false;
     }
 
     // 8. If key is "Shift", let source's shift property be false.
     else if (key == "Shift"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Shift;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Shift);
         source.shift = false;
     }
 
     // 9. If key is "Control", let source's ctrl property be false.
     else if (key == "Control"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Ctrl;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Ctrl);
         source.ctrl = false;
     }
 
     // 10. If key is "Meta", let source's meta property be false.
     else if (key == "Meta"sv) {
-        modifiers &= ~UIEvents::KeyModifier::Mod_Super;
+        clear_modifier(modifiers, UIEvents::KeyModifier::Mod_Super);
         source.meta = false;
     }
 
@@ -1121,9 +1130,10 @@ static ErrorOr<void, WebDriver::Error> dispatch_pointer_down_action(ActionObject
     //     and [POINTER-EVENTS]. set ctrlKey, shiftKey, altKey, and metaKey equal to the corresponding items in global
     //     key state. Type specific properties for the pointer that are not exposed through the webdriver API must be
     //     set to the default value specified for hardware that doesn't support that property.
+    int click_count = 1;
     switch (pointer_type) {
     case PointerInputSource::Subtype::Mouse:
-        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers());
+        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers(), click_count);
         break;
     case PointerInputSource::Subtype::Pen:
         return WebDriver::Error::from_code(WebDriver::ErrorCode::UnsupportedOperation, "Pen events not implemented"sv);
@@ -1364,7 +1374,7 @@ GC_DEFINE_ALLOCATOR(ActionExecutor);
 void wait_for_an_action_queue_token(InputState& input_state)
 {
     // 1. Let token be a new unique identifier.
-    auto token = MUST(Crypto::generate_random_uuid());
+    auto token = Crypto::generate_random_uuid();
 
     // 2. Enqueue token in input state's actions queue.
     input_state.actions_queue.append(token);

@@ -7,7 +7,6 @@
 #pragma once
 
 #include <AK/FlyString.h>
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/CSS/URL.h>
 
@@ -33,6 +32,8 @@ public:
     virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(FontSourceStyleValue const&) const;
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     FontSourceStyleValue(Source source, Optional<FlyString> format, Vector<FontTech> tech);

@@ -74,7 +74,6 @@ namespace JS {
     P(ceil)                                  \
     P(charAt)                                \
     P(charCodeAt)                            \
-    P(cleanupSome)                           \
     P(clear)                                 \
     P(clz32)                                 \
     P(codePointAt)                           \
@@ -194,7 +193,6 @@ namespace JS {
     P(fromHex)                               \
     P(fround)                                \
     P(Function)                              \
-    P(gc)                                    \
     P(get)                                   \
     P(getBigInt64)                           \
     P(getBigUint64)                          \
@@ -353,6 +351,7 @@ namespace JS {
     P(minute)                                \
     P(minutes)                               \
     P(minutesDisplay)                        \
+    P(mode)                                  \
     P(month)                                 \
     P(monthCode)                             \
     P(months)                                \
@@ -385,6 +384,7 @@ namespace JS {
     P(opener)                                \
     P(overflow)                              \
     P(ownKeys)                               \
+    P(padding)                               \
     P(padEnd)                                \
     P(padStart)                              \
     P(parse)                                 \
@@ -610,6 +610,8 @@ namespace JS {
     P(yearOfWeek)                            \
     P(years)                                 \
     P(yearsDisplay)                          \
+    P(zip)                                   \
+    P(zipKeyed)                              \
     P(zonedDateTimeISO)
 
 struct CommonPropertyNames {

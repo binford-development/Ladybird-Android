@@ -10,8 +10,9 @@
 #include <AK/Assertions.h>
 #include <AK/ByteString.h>
 #include <AK/CharacterTypes.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/StringBuilder.h>
-#include <AK/StringFloatingPointConversions.h>
+#include <AK/StringConversions.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf8View.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
@@ -58,7 +59,11 @@ static inline bool same_type_for_equality(Value const& lhs, Value const& rhs)
     return false;
 }
 
-static Crypto::SignedBigInteger const BIGINT_ZERO { 0 };
+static auto const& bigint_zero()
+{
+    static NeverDestroyed<Crypto::SignedBigInteger> zero { 0 };
+    return *zero;
+}
 
 static ALWAYS_INLINE bool both_number(Value const& lhs, Value const& rhs)
 {
@@ -104,14 +109,13 @@ void number_to_string(StringBuilder& builder, double d, NumberToStringMode mode)
         return;
     }
 
-    // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k,
-    // 𝔽(s × radix ^ (n - k)) is x, and k is as small as possible. Note that k is the number of
-    // digits in the representation of s using radix radix, that s is not divisible by radix, and
-    // that the least significant digit of s is not necessarily uniquely determined by these criteria.
+    // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k, 𝔽(s × radix ^ (n - k)) is x, and
+    //    k is as small as possible. Note that k is the number of digits in the representation of s using radix radix,
+    //    that s is not divisible by radix, and that the least significant digit of s is not necessarily uniquely
+    //    determined by these criteria.
     //
-    // Note: guarantees provided by convert_floating_point_to_decimal_exponential_form satisfy
-    //       requirements of NOTE 2.
-    auto [sign, mantissa, exponent] = convert_floating_point_to_decimal_exponential_form(d);
+    // NB: guarantees provided by convert_to_decimal_exponential_form satisfy requirements of NOTE 2.
+    auto [sign, mantissa, exponent] = AK::convert_to_decimal_exponential_form(d);
     i32 k = 0;
     AK::Array<char, 20> mantissa_digits;
     convert_to_decimal_digits_array(mantissa, mantissa_digits, k);
@@ -235,17 +239,16 @@ ThrowCompletionOr<bool> Value::is_array(VM& vm) const
     auto const& object = as_object();
 
     // 2. If argument is an Array exotic object, return true.
-    if (is<Array>(object))
+    if (::is<Array>(object))
         return true;
 
     // 3. If argument is a Proxy exotic object, then
     if (auto const* proxy = ::as_if<ProxyObject>(object)) {
-
         // a. Perform ? ValidateNonRevokedProxy(argument).
         TRY(proxy->validate_non_revoked_proxy());
 
         // b. Let proxyTarget be argument.[[ProxyTarget]].
-        auto& proxy_target = proxy->target();
+        auto const& proxy_target = proxy->target();
 
         // c. Return ? IsArray(proxyTarget).
         return Value(&proxy_target).is_array(vm);
@@ -255,10 +258,11 @@ ThrowCompletionOr<bool> Value::is_array(VM& vm) const
     return false;
 }
 
-Array& Value::as_array()
+Array& Value::as_array_exotic_object()
 {
-    ASSERT(is_object() && is<Array>(as_object()));
-    return static_cast<Array&>(as_object());
+    auto ptr = as_if<Array>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 // 7.2.3 IsCallable ( argument ), https://tc39.es/ecma262/#sec-iscallable
@@ -272,14 +276,16 @@ bool Value::is_function() const
 
 FunctionObject& Value::as_function()
 {
-    ASSERT(is_function());
-    return static_cast<FunctionObject&>(as_object());
+    auto ptr = as_if<FunctionObject>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 FunctionObject const& Value::as_function() const
 {
-    ASSERT(is_function());
-    return static_cast<FunctionObject const&>(as_object());
+    auto ptr = as_if<FunctionObject>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 // 7.2.4 IsConstructor ( argument ), https://tc39.es/ecma262/#sec-isconstructor
@@ -305,7 +311,7 @@ ThrowCompletionOr<bool> Value::is_regexp(VM& vm) const
         return false;
 
     // 2. Let matcher be ? Get(argument, @@match).
-    static Bytecode::PropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     auto matcher = TRY(as_object().get(vm.well_known_symbol_match(), cache));
 
     // 3. If matcher is not undefined, return ToBoolean(matcher).
@@ -314,7 +320,7 @@ ThrowCompletionOr<bool> Value::is_regexp(VM& vm) const
 
     // 4. If argument has a [[RegExpMatcher]] internal slot, return true.
     // 5. Return false.
-    return is<RegExpObject>(as_object());
+    return ::is<RegExpObject>(as_object());
 }
 
 // 13.5.3 The typeof Operator, https://tc39.es/ecma262/#sec-typeof-operator
@@ -553,7 +559,7 @@ bool Value::to_boolean_slow_case() const
     case STRING_TAG:
         return !as_string().is_empty();
     case BIGINT_TAG:
-        return as_bigint().big_integer() != BIGINT_ZERO;
+        return as_bigint().big_integer() != bigint_zero();
     case OBJECT_TAG:
         // B.3.6.1 Changes to ToBoolean, https://tc39.es/ecma262/#sec-IsHTMLDDA-internal-slot-to-boolean
         // 3. If argument is an Object and argument has an [[IsHTMLDDA]] internal slot, return false.
@@ -574,7 +580,7 @@ ThrowCompletionOr<Value> Value::to_primitive_slow_case(VM& vm, PreferredType pre
     // 1. If input is an Object, then
     if (is_object()) {
         // a. Let exoticToPrim be ? GetMethod(input, @@toPrimitive).
-        static Bytecode::PropertyLookupCache cache;
+        static auto& cache = *new Bytecode::StaticPropertyLookupCache;
         auto exotic_to_primitive = TRY(get_method(vm, vm.well_known_symbol_to_primitive(), cache));
 
         // b. If exoticToPrim is not undefined, then
@@ -933,7 +939,7 @@ static Optional<BigInt*> string_to_bigint(VM& vm, StringView string)
     // 4. Let mv be the MV of literal.
     // 5. Assert: mv is an integer.
     auto bigint = MUST(Crypto::SignedBigInteger::from_base(result->base, result->literal));
-    if (result->is_negative && (bigint != BIGINT_ZERO))
+    if (result->is_negative && (bigint != bigint_zero()))
         bigint.negate();
 
     // 6. Return ℤ(mv).
@@ -1614,8 +1620,8 @@ ThrowCompletionOr<Value> unary_minus(VM& vm, Value lhs)
 
     // 6.1.6.2.1 BigInt::unaryMinus ( x ), https://tc39.es/ecma262/#sec-numeric-types-bigint-unaryMinus
     // 1. If x is 0ℤ, return 0ℤ.
-    if (old_value.as_bigint().big_integer() == BIGINT_ZERO)
-        return BigInt::create(vm, BIGINT_ZERO);
+    if (old_value.as_bigint().big_integer() == bigint_zero())
+        return BigInt::create(vm, bigint_zero());
 
     // 2. Return the BigInt value that represents the negation of ℝ(x).
     auto big_integer_negated = old_value.as_bigint().big_integer();
@@ -1943,7 +1949,7 @@ ThrowCompletionOr<Value> div(VM& vm, Value lhs, Value rhs)
         auto x = lhs_numeric.as_bigint().big_integer();
         auto y = rhs_numeric.as_bigint().big_integer();
         // 1. If y is 0ℤ, throw a RangeError exception.
-        if (y == BIGINT_ZERO)
+        if (y == bigint_zero())
             return vm.throw_completion<RangeError>(ErrorType::DivisionByZero);
         // 2. Let quotient be ℝ(x) / ℝ(y).
         // 3. Return the BigInt value that represents quotient rounded towards 0 to the next integer value.
@@ -1983,7 +1989,7 @@ ThrowCompletionOr<Value> mod(VM& vm, Value lhs, Value rhs)
         auto n = lhs_numeric.as_bigint().big_integer();
         auto d = rhs_numeric.as_bigint().big_integer();
         // 1. If d is 0ℤ, throw a RangeError exception.
-        if (d == BIGINT_ZERO)
+        if (d == bigint_zero())
             return vm.throw_completion<RangeError>(ErrorType::DivisionByZero);
         // 2. If n is 0ℤ, return 0ℤ.
         // 3. Let quotient be ℝ(n) / ℝ(d).
@@ -2152,7 +2158,7 @@ ThrowCompletionOr<Value> instance_of(VM& vm, Value value, Value target)
         return vm.throw_completion<TypeError>(ErrorType::NotAnObject, target);
 
     // 2. Let instOfHandler be ? GetMethod(target, @@hasInstance).
-    static Bytecode::PropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     auto instance_of_handler = TRY(target.get_method(vm, vm.well_known_symbol_has_instance(), cache));
 
     // 3. If instOfHandler is not undefined, then
@@ -2185,12 +2191,10 @@ ThrowCompletionOr<Value> ordinary_has_instance(VM& vm, Value lhs, Value rhs)
     auto& rhs_function = rhs.as_function();
 
     // 2. If C has a [[BoundTargetFunction]] internal slot, then
-    if (is<BoundFunction>(rhs_function)) {
-        auto const& bound_target = static_cast<BoundFunction const&>(rhs_function);
-
+    if (auto const* bound_target = as_if<BoundFunction>(rhs_function)) {
         // a. Let BC be C.[[BoundTargetFunction]].
         // b. Return ? InstanceofOperator(O, BC).
-        return instance_of(vm, lhs, Value(&bound_target.bound_target_function()));
+        return instance_of(vm, lhs, Value(&bound_target->bound_target_function()));
     }
 
     // 3. If O is not an Object, return false.
@@ -2200,7 +2204,7 @@ ThrowCompletionOr<Value> ordinary_has_instance(VM& vm, Value lhs, Value rhs)
     auto* lhs_object = &lhs.as_object();
 
     // 4. Let P be ? Get(C, "prototype").
-    static Bytecode::PropertyLookupCache cache;
+    static auto& cache = *new Bytecode::StaticPropertyLookupCache;
     auto rhs_prototype = TRY(rhs.get(vm, vm.names.prototype, cache));
 
     // 5. If P is not an Object, throw a TypeError exception.

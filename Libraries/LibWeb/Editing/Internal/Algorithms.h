@@ -7,8 +7,8 @@
 #pragma once
 
 #include <AK/Vector.h>
-#include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/Range.h>
+#include <LibWeb/Forward.h>
 #include <LibWeb/Selection/Selection.h>
 
 namespace Web::Editing {
@@ -57,8 +57,7 @@ GC::Ptr<DOM::Node> block_node_of_node(GC::Ref<DOM::Node>);
 Utf16String canonical_space_sequence(size_t length, bool non_breaking_start, bool non_breaking_end);
 void canonicalize_whitespace(DOM::BoundaryPoint, bool fix_collapsed_space = true);
 Vector<GC::Ref<DOM::Node>> clear_the_value(FlyString const&, GC::Ref<DOM::Element>);
-void delete_the_selection(Selection&, bool block_merging = true, bool strip_wrappers = true,
-    Selection::Direction direction = Selection::Direction::Forwards);
+void delete_the_selection(Selection&, bool block_merging = true, bool strip_wrappers = true, Selection::Direction = Selection::Direction::Forwards);
 Optional<Utf16String> effective_command_value(GC::Ptr<DOM::Node>, FlyString const& command);
 DOM::BoundaryPoint first_equivalent_point(DOM::BoundaryPoint);
 void fix_disallowed_ancestors_of_node(GC::Ref<DOM::Node>);
@@ -105,7 +104,7 @@ Optional<DOM::BoundaryPoint> previous_equivalent_point(DOM::BoundaryPoint);
 void push_down_values(FlyString const&, GC::Ref<DOM::Node>, Optional<Utf16String const&>);
 Vector<RecordedOverride> record_current_overrides(DOM::Document const&);
 Vector<RecordedOverride> record_current_states_and_values(DOM::Document const&);
-GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(GC::Heap&, Vector<GC::Ref<DOM::Node>> const&);
+GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(Vector<GC::Ref<DOM::Node>> const&);
 void remove_extraneous_line_breaks_at_the_end_of_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_before_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_from_a_node(GC::Ref<DOM::Node>);

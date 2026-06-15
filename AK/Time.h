@@ -8,7 +8,6 @@
 
 #include <AK/Array.h>
 #include <AK/Assertions.h>
-#include <AK/Badge.h>
 #include <AK/Checked.h>
 #include <AK/Platform.h>
 #include <AK/String.h>
@@ -61,10 +60,12 @@ unsigned day_of_week(int year, unsigned month, int day);
 // can be negative.
 constexpr int day_of_year(int year, unsigned month, int day)
 {
-    if (is_constant_evaluated())
+    if consteval {
         VERIFY(month >= 1 && month <= 12); // Note that this prevents bad constexpr months, but never actually prints anything.
-    else if (!(month >= 1 && month <= 12))
-        return 0;
+    } else {
+        if (!(month >= 1 && month <= 12))
+            return 0;
+    }
 
     constexpr Array seek_table = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
     int day_of_year = seek_table[month - 1] + day - 1;
@@ -246,6 +247,7 @@ public:
     [[nodiscard]] static Duration from_timespec(const struct timespec&);
     [[nodiscard]] static Duration from_timeval(const struct timeval&);
     [[nodiscard]] static Duration from_time_units(i64 units, u32 numerator, u32 denominator);
+    [[nodiscard]] Duration scaled_by(u32 numerator, u32 denominator) const;
     // We don't pull in <stdint.h> for the pretty min/max definitions because this file is also included in the Kernel
     [[nodiscard]] constexpr static Duration min() { return Duration(-__INT64_MAX__ - 1LL, 0); }
     [[nodiscard]] constexpr static Duration zero() { return Duration(0, 0); }
@@ -445,6 +447,11 @@ public:
     [[nodiscard]] constexpr static UnixDateTime from_milliseconds_since_epoch(i64 milliseconds)
     {
         return UnixDateTime { Duration::from_milliseconds(milliseconds) };
+    }
+
+    [[nodiscard]] constexpr static UnixDateTime from_microseconds_since_epoch(i64 microseconds)
+    {
+        return UnixDateTime { Duration::from_microseconds(microseconds) };
     }
 
     [[nodiscard]] constexpr static UnixDateTime from_nanoseconds_since_epoch(i64 nanoseconds)

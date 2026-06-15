@@ -9,7 +9,6 @@
 
 #pragma once
 
-#include <AK/ByteString.h>
 #include <AK/String.h>
 #include <LibCrypto/BigInt/TommathForward.h>
 
@@ -47,6 +46,8 @@ public:
     [[nodiscard]] static ErrorOr<UnsignedBigInteger> from_base(u16 N, StringView str);
     [[nodiscard]] ErrorOr<String> to_base(u16 N) const;
 
+    [[nodiscard]] size_t count_digits_in_base(u16 base) const;
+
     [[nodiscard]] u64 to_u64() const;
 
     enum class RoundingMode {
@@ -68,6 +69,7 @@ public:
     [[nodiscard]] bool is_odd() const;
 
     [[nodiscard]] size_t byte_length() const;
+    [[nodiscard]] size_t external_memory_size() const { return m_mp.alloc * sizeof(mp_digit); }
 
     size_t one_based_index_of_highest_set_bit() const;
 

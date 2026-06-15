@@ -20,6 +20,9 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
 {
     if (auto ladybird_source_dir = Core::Environment::get("LADYBIRD_SOURCE_DIR"sv); ladybird_source_dir.has_value())
         test_root_path = LexicalPath::join(*ladybird_source_dir, "Tests"sv, "LibWeb"sv).string();
+
+    if (Core::Environment::has("CLAUDECODE"sv) || Core::Environment::has("CODEX_SANDBOX"sv))
+        quiet = true;
 }
 
 Application::~Application()
@@ -35,11 +38,16 @@ void Application::create_platform_arguments(Core::ArgsParser& args_parser)
     args_parser.add_option(test_concurrency, "Maximum number of tests to run at once", "test-concurrency", 'j', "jobs");
     args_parser.add_option(test_globs, "Only run tests matching the given glob", "filter", 'f', "glob");
     args_parser.add_option(python_executable_path, "Path to python3", "python-executable", 'P', "path");
-    args_parser.add_option(dump_failed_ref_tests, "Dump screenshots of failing ref tests", "dump-failed-ref-tests", 'D');
     args_parser.add_option(dump_gc_graph, "Dump GC graph", "dump-gc-graph", 'G');
+    args_parser.add_option(fail_fast, "Abort on first failure/timeout/crash (offers debugger attach on timeout)", "fail-fast");
+
+    args_parser.add_option(repeat_count, "Repeat all matched tests N times", "repeat", 0, "n");
+
     args_parser.add_option(test_dry_run, "List the tests that would be run, without running them", "dry-run");
     args_parser.add_option(rebaseline, "Rebaseline any executed layout or text tests", "rebaseline");
     args_parser.add_option(shuffle, "Shuffle the order of tests before running them", "shuffle", 's');
+    args_parser.add_option(run_ui_process_session_history_tests, "Run tests that require UI-process session history seeding",
+        "run-ui-process-session-history-tests");
     args_parser.add_option(per_test_timeout_in_seconds, "Per-test timeout (default: 30)", "per-test-timeout", 't', "seconds");
 
     args_parser.add_option(Core::ArgsParser::Option {
@@ -79,6 +87,8 @@ void Application::create_platform_options(WebView::BrowserOptions& browser_optio
     // Ensure consistent time zone operations across different machine configurations.
     web_content_options.default_time_zone = "UTC"sv;
 
+    web_content_options.report_session_history_updates_in_test_mode = WebView::ReportSessionHistoryUpdatesInTestMode::Yes;
+
     if (dump_gc_graph) {
         // Force all tests to run in serial if we are interested in the GC graph.
         test_concurrency = 1;
@@ -97,11 +107,6 @@ ErrorOr<void> Application::launch_test_fixtures()
     }
 
     return {};
-}
-
-bool Application::should_capture_web_content_output() const
-{
-    return verbosity < Application::VERBOSITY_LEVEL_LOG_TEST_OUTPUT;
 }
 
 }

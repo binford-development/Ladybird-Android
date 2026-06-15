@@ -10,11 +10,6 @@
 #pragma once
 
 #include <LibGfx/Filter.h>
-#include <LibWeb/CSS/Angle.h>
-#include <LibWeb/CSS/CalculatedOr.h>
-#include <LibWeb/CSS/Length.h>
-#include <LibWeb/CSS/Number.h>
-#include <LibWeb/CSS/PercentageOr.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/CSS/URL.h>
 
@@ -23,39 +18,44 @@ namespace Web::CSS {
 namespace FilterOperation {
 
 struct Blur {
-    LengthOrCalculated radius { Length::make_px(0) };
-    float resolved_radius(Layout::Node const&) const;
+    ValueComparingNonnullRefPtr<StyleValue const> radius;
+    float resolved_radius() const;
     bool operator==(Blur const&) const = default;
+    bool is_computationally_independent() const { return radius->is_computationally_independent(); }
 };
 
+// FIXME: It would be nice if we could use a ShadowStyleValue here
 struct DropShadow {
-    LengthOrCalculated offset_x;
-    LengthOrCalculated offset_y;
-    Optional<LengthOrCalculated> radius;
+    ValueComparingNonnullRefPtr<StyleValue const> offset_x;
+    ValueComparingNonnullRefPtr<StyleValue const> offset_y;
+    ValueComparingRefPtr<StyleValue const> radius;
     ValueComparingRefPtr<StyleValue const> color;
     bool operator==(DropShadow const&) const = default;
+    bool is_computationally_independent() const
+    {
+        return offset_x->is_computationally_independent()
+            && offset_y->is_computationally_independent()
+            && (!radius || radius->is_computationally_independent())
+            && (!color || color->is_computationally_independent());
+    }
 };
 
 struct HueRotate {
-    struct Zero {
-        bool operator==(Zero const&) const = default;
-    };
-    using AngleOrZero = Variant<AngleOrCalculated, Zero>;
-    AngleOrZero angle { Angle::make_degrees(0) };
-    float angle_degrees(Layout::Node const&) const;
+    ValueComparingNonnullRefPtr<StyleValue const> angle;
+    float angle_degrees() const;
     bool operator==(HueRotate const&) const = default;
+    bool is_computationally_independent() const { return angle->is_computationally_independent(); }
 };
 
 struct Color {
     Gfx::ColorFilterType operation;
-    NumberPercentage amount { Number { Number::Type::Integer, 1.0 } };
+    ValueComparingNonnullRefPtr<StyleValue const> amount;
     float resolved_amount() const;
     bool operator==(Color const&) const = default;
+    bool is_computationally_independent() const { return amount->is_computationally_independent(); }
 };
 
 };
-
-using FilterValue = Variant<FilterOperation::Blur, FilterOperation::DropShadow, FilterOperation::HueRotate, FilterOperation::Color, URL>;
 
 class FilterValueListStyleValue final : public StyleValueWithDefaultOperators<FilterValueListStyleValue> {
 public:
@@ -76,6 +76,17 @@ public:
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     virtual ~FilterValueListStyleValue() override = default;
+
+    virtual bool is_computationally_independent() const override
+    {
+        return all_of(
+            m_filter_value_list,
+            [](auto const& filter_value) {
+                return filter_value.visit(
+                    [](URL const&) { return true; },
+                    [](auto const& value) { return value.is_computationally_independent(); });
+            });
+    }
 
     bool properties_equal(FilterValueListStyleValue const& other) const { return m_filter_value_list == other.m_filter_value_list; }
 
