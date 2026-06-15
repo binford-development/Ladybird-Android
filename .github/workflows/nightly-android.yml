@@ -1,9 +1,10 @@
 name: Nightly Android
 
 on:
+  workflow_dispatch:
   # Automatically run at the end of every day.
-  schedule:
-    - cron: '0 0 * * *'
+  # schedule:
+  #   - cron: '0 0 1 * *'
 
 env:
   # runner.workspace = /home/runner/work/ladybird
@@ -105,3 +106,12 @@ jobs:
           ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}
           vcpkg_cache_path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
           vcpkg_cache_primary_key: ${{ steps.cache-restore.outputs.vcpkg_cache_primary_key }}
+
+# === UPLOAD ALL APKS IF SUCCESSFUL ===
+      
+      - name: Upload Raw Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-raw-apks
+          path: |
+            ${{ github.workspace }}/UI/Android/**/*.apk
