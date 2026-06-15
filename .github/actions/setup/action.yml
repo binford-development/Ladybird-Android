@@ -124,7 +124,10 @@ runs:
         elif ${{ runner.arch == 'X64' }} ; then
           ARCH=x86_64
         else
-          ARCH=${{ inputs.arch }}
+          ARCH=$(uname -m)
+          if [ "$ARCH" = 'arm64' ] ; then
+            ARCH=aarch64
+          fi
         fi
         LOWERCASE_OS=$( echo -n '${{ runner.os }}' | tr '[:upper:]' '[:lower:]')
         if ${{ runner.os == 'Windows' }} ; then
