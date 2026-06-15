@@ -1,4 +1,4 @@
-name: Process & Publish Release
+name: Nightly Android Release
 
 on:
   workflow_dispatch:
