@@ -119,6 +119,10 @@ elseif (APPLE)
     endif()
 endif()
 
+if (ANDROID)
+    target_link_libraries(AK PUBLIC log)
+endif()
+
 # Manually install AK headers
 if (ENABLE_INSTALL_HEADERS)
     install(
