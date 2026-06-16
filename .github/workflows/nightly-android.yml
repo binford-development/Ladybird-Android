@@ -37,6 +37,13 @@ jobs:
           os: ${{ matrix.os_name }}
           arch: 'Lagom'
 
+      - name: Clean Rust Toolchain
+        run: |
+          if command -v rustup &> /dev/null; then
+            rm -f ~/.cargo/bin/cargo-clippy || true
+            rustup self uninstall -y || true
+          fi
+
       - name: Set Up Java
         uses: actions/setup-java@v5
         with:
