@@ -40,7 +40,7 @@ android {
     }
 
     signingConfigs {
-        create("release") {
+        register("release") {
             storeFile = file("public-debug.keystore")
             storePassword = "publicpassword"
             keyAlias = "publickey"
