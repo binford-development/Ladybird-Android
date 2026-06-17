@@ -417,10 +417,16 @@ void BytecodeInterpreter::interpret(Configuration& configuration)
         did_install_compiled_fault_recovery = true;
         if (setjmp(compiled_fault_recovery.jump_buffer) != 0) {
             s_compiled_fault_recovery = compiled_fault_recovery.previous;
+            
+            #if WASM_COMPILED_FAULT_RECOVERY_SUPPORTED
             if (compiled_fault_recovery.fault_kind == CompiledFaultKind::CraneliftTrap)
                 m_trap = Trap::from_string(cranelift_trap_message(compiled_fault_recovery.cranelift_trap_code));
             else
                 m_trap = Trap::from_string("Memory access out of bounds");
+            #else
+            m_trap = Trap::from_string("Memory access out of bounds");
+            #endif
+            
             return;
         }
     }
